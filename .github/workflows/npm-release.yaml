@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
       - run: |
           docker run --rm -v $(pwd):/tmp/project --entrypoint /bin/sh --platform linux/amd64 node:20-alpine -c "\
-          apk add build-base --update-cache && \
+          apk add build-base bash --update-cache && \
           cd /tmp/project && \
           ./scripts/vendor.sh && \
           make loadable"
@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
       - run: |
           docker run --rm -v $(pwd):/tmp/project --entrypoint /bin/sh --platform linux/arm64 node:20-alpine -c "\
-          apk add build-base --update-cache && \
+          apk add build-base bash --update-cache && \
           cd /tmp/project && \
           ./scripts/vendor.sh && \
           make loadable"
