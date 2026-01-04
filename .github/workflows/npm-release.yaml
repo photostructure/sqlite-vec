@@ -36,6 +36,15 @@ name: "npm Release"
 #
 # 3. Now this workflow can publish subsequent versions automatically
 
+#
+# RELEASE FLOW:
+#   1. prepare-release: Creates a release branch, bumps VERSION/sqlite-vec.h/package.json
+#   2. build-*: All builds run from the release branch (with correct version baked in)
+#   3. publish-npm: Publishes to npm, then merges release branch to main on success
+#
+# If any step fails, main is untouched and the release branch can be deleted.
+#
+
 on:
   workflow_dispatch:
     inputs:
@@ -53,10 +62,70 @@ permissions:
   contents: read
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      release_branch: ${{ steps.prepare.outputs.branch }}
+      new_version: ${{ steps.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: "20"
+
+      - uses: photostructure/git-ssh-signing-action@fdd4b062a9ba41473f013258cc9c7eea1640f826 # v1.2.0
+        with:
+          ssh-signing-key: ${{ secrets.SSH_SIGNING_KEY }}
+          git-user-name: ${{ secrets.GIT_USER_NAME }}
+          git-user-email: ${{ secrets.GIT_USER_EMAIL }}
+
+      - name: Prepare release branch
+        id: prepare
+        run: |
+          # Get current version from VERSION file (source of truth)
+          CURRENT=$(cat VERSION | tr -d '[:space:]')
+          echo "Current version: $CURRENT"
+
+          # Calculate new version using npm's semver
+          # Strip any prerelease suffix for the bump, then we'll keep it simple (no prerelease)
+          BASE_VERSION=$(echo "$CURRENT" | sed 's/-.*//')
+          NEW_VERSION=$(npx semver -i ${{ github.event.inputs.version }} "$BASE_VERSION")
+          echo "New version: $NEW_VERSION"
+
+          # Create release branch
+          BRANCH="release/v${NEW_VERSION}"
+          git checkout -b "$BRANCH"
+
+          # Update VERSION file
+          echo "$NEW_VERSION" > VERSION
+
+          # Regenerate sqlite-vec.h from template
+          make sqlite-vec.h
+
+          # Update package.json (without creating git commit/tag)
+          npm version "$NEW_VERSION" --no-git-tag-version
+
+          # Commit all version changes
+          git add VERSION sqlite-vec.h package.json package-lock.json
+          git commit -S -m "release: v${NEW_VERSION}"
+          git push origin "$BRANCH"
+
+          # Output for subsequent jobs
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
   build-linux-x64:
+    needs: [prepare-release]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - run: ./scripts/vendor.sh
       - run: make loadable
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -65,11 +134,13 @@ jobs:
           path: dist/vec0.so
 
   build-linux-arm64:
+    needs: [prepare-release]
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - run: ./scripts/vendor.sh
-      - run: make sqlite-vec.h
       - run: make loadable
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -77,9 +148,12 @@ jobs:
           path: dist/vec0.so
 
   build-linux-x64-musl:
+    needs: [prepare-release]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - run: |
           docker run --rm -v $(pwd):/tmp/project --entrypoint /bin/sh --platform linux/amd64 node:20-alpine -c "\
           apk add build-base bash curl unzip --update-cache && \
@@ -92,9 +166,12 @@ jobs:
           path: dist/vec0.so
 
   build-linux-arm64-musl:
+    needs: [prepare-release]
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - run: |
           docker run --rm -v $(pwd):/tmp/project --entrypoint /bin/sh --platform linux/arm64 node:20-alpine -c "\
           apk add build-base bash curl unzip --update-cache && \
@@ -107,9 +184,12 @@ jobs:
           path: dist/vec0.so
 
   build-darwin-x64:
+    needs: [prepare-release]
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - run: ./scripts/vendor.sh
       - run: make loadable
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -118,9 +198,12 @@ jobs:
           path: dist/vec0.dylib
 
   build-darwin-arm64:
+    needs: [prepare-release]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - run: ./scripts/vendor.sh
       - run: make loadable
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -129,13 +212,15 @@ jobs:
           path: dist/vec0.dylib
 
   build-win32-x64:
+    needs: [prepare-release]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - run: ./scripts/vendor.sh
         shell: bash
-      - run: make sqlite-vec.h
       - run: mkdir dist
       - run: cl.exe /fPIC -shared /W4 /Ivendor/ /O2 /LD sqlite-vec.c -o dist/vec0.dll
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -144,15 +229,17 @@ jobs:
           path: dist/vec0.dll
 
   build-win32-arm64:
+    needs: [prepare-release]
     runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: arm64
       - run: ./scripts/vendor.sh
         shell: bash
-      - run: make sqlite-vec.h
       - run: mkdir dist
       - run: cl.exe /fPIC -shared /W4 /Ivendor/ /O2 /LD sqlite-vec.c -o dist/vec0.dll
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -164,6 +251,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs:
       [
+        prepare-release,
         build-linux-x64,
         build-linux-arm64,
         build-linux-x64-musl,
@@ -176,10 +264,14 @@ jobs:
     permissions:
       contents: write # Required to push version commits and tags
       id-token: write # Required for npm OIDC trusted publishing
+    env:
+      NEW_VERSION: ${{ needs.prepare-release.outputs.new_version }}
+      RELEASE_BRANCH: ${{ needs.prepare-release.outputs.release_branch }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          fetch-depth: 0 # Full history for version tags
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
+          fetch-depth: 0 # Full history for merging
 
       # Download all artifacts into platform-specific subdirectories
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -233,12 +325,7 @@ jobs:
       - name: Bump version and create signed tag
         run: |
           npm version ${{ github.event.inputs.version }} --sign-git-tag -m "release: %s"
-          NEW_VERSION=$(npm pkg get version | tr -d '"')
-          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
-          # Keep VERSION file in sync with package.json
-          echo "$NEW_VERSION" > VERSION
-          git add VERSION
-          git commit --amend --no-edit
+          echo "NEW_VERSION=$(npm pkg get version | tr -d '\"')" >> $GITHUB_ENV
 
       - name: Push version commit and tag
         run: git push origin main --follow-tags
@@ -250,7 +337,7 @@ jobs:
 
       - name: Publish to npm with OIDC
         run: |
-          VERSION="${{ env.NEW_VERSION }}"
+          VERSION="${NEW_VERSION}"
           # Extract prerelease identifier if present (e.g., "beta" from "1.0.0-beta.1")
           if [[ "$VERSION" == *"-"* ]]; then
             TAG=$(echo "$VERSION" | sed 's/.*-\([a-zA-Z]*\).*/\1/')
@@ -258,3 +345,23 @@ jobs:
           else
             npm publish --provenance --access public
           fi
+
+      # Only after successful npm publish: merge to main, tag, and create release
+      - name: Merge release branch to main
+        run: |
+          git checkout main
+          git merge --ff-only "$RELEASE_BRANCH"
+
+      - name: Create signed tag
+        run: git tag -s "v${NEW_VERSION}" -m "v${NEW_VERSION}"
+
+      - name: Push to main with tag
+        run: git push origin main --follow-tags
+
+      - name: Delete release branch
+        run: git push origin --delete "$RELEASE_BRANCH"
+
+      - name: Create GitHub Release
+        run: gh release create "v${NEW_VERSION}" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
