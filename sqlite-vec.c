@@ -7730,6 +7730,13 @@ cleanup:
 
   sqlite3_free(aMetadataIn);
 
+  // On error, knn_data was never assigned to the cursor, so free it here.
+  // On success, it's owned by pCur->knn_data and will be freed by vec0_cursor_clear.
+  if (rc != SQLITE_OK) {
+    vec0_query_knn_data_clear(knn_data);
+    sqlite3_free(knn_data);
+  }
+
   return rc;
 }
 
