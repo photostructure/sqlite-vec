@@ -8,7 +8,14 @@
 > - Once development resumes on the original repository, users are encouraged to switch back.
 > - All credit for the original implementation goes to [Alex Garcia](https://github.com/asg017).
 > - Credit for creating the fork and merging PRs goes to [Vlad Lasky](https://github.com/vlasky).
-> - Minor hardening and SQLite updates have been done to this fork -- feel free to cherry-pick any changes back upstream -- commits are kept isolated for this purpose.
+> 
+> This branch includes:
+> - Hardening (replaced atoi() with strtol(), vendor.sh SHA validation, pinned GHA versions, OIDC releases)
+> - Update to the latest SQLite release (should be no-op, and backward compatible)
+> - Node.js release added Alpine/MUSL x64/arm64 and Windows arm64 prebuilds
+> - Node.js package now includes all prebuilds (so post-install scriptes!)
+
+> Feel free to cherry-pick any changes back upstream -- commits are kept small and isolated for this purpose.
 
 An extremely small, "fast enough" vector search SQLite extension that runs
 anywhere! A successor to [`sqlite-vss`](https://github.com/asg017/sqlite-vss)
