@@ -1,6 +1,6 @@
 {
   "name": "@mceachen/sqlite-vec",
-  "version": "0.2.3-alpha",
+  "version": "0.3.0",
   "description": "A vector search SQLite extension that runs anywhere",
   "main": "./index.cjs",
   "module": "./index.mjs",
@@ -28,7 +28,7 @@
   ],
   "author": "Alex Garcia <alex@alex.garcia>",
   "contributors": [
-    "Vlad Lasky", 
+    "Vlad Lasky",
     "Matthew McEachen"
   ],
   "license": "(MIT OR Apache-2.0)",
