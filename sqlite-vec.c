@@ -551,6 +551,31 @@ static u8 hamdist_table[256] = {
   4, 5, 5, 6, 5, 6, 6, 7, 3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
   4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8};
 
+// MSVC-compatible __builtin_popcountl - must be defined before first use
+#ifdef _MSC_VER
+#if !defined(__clang__) && (defined(_M_ARM) || defined(_M_ARM64))
+// From
+// https://github.com/ngtcp2/ngtcp2/blob/b64f1e77b5e0d880b93d31f474147fae4a1d17cc/lib/ngtcp2_ringbuf.c,
+// line 34-43
+static unsigned int __builtin_popcountl(u64 x) {
+  unsigned int c = 0;
+  for (; x; ++c) {
+    x &= x - 1;
+  }
+  return c;
+}
+#else
+#include <intrin.h>
+#ifdef _WIN64
+#define __builtin_popcountl __popcnt64
+#else
+static unsigned int __builtin_popcountl(u64 n) {
+  return __popcnt((u32)n) + __popcnt((u32)(n >> 32));
+}
+#endif
+#endif
+#endif
+
 static f32 distance_cosine_bit_u64(u64 *a, u64 *b, size_t n) {
   f32 dot = 0;
   f32 aMag = 0;
@@ -633,30 +658,6 @@ static f32 distance_hamming_u8(u8 *a, u8 *b, size_t n) {
   }
   return (f32)same;
 }
-
-#ifdef _MSC_VER
-#if !defined(__clang__) && (defined(_M_ARM) || defined(_M_ARM64))
-// From
-// https://github.com/ngtcp2/ngtcp2/blob/b64f1e77b5e0d880b93d31f474147fae4a1d17cc/lib/ngtcp2_ringbuf.c,
-// line 34-43
-static unsigned int __builtin_popcountl(u64 x) {
-  unsigned int c = 0;
-  for (; x; ++c) {
-    x &= x - 1;
-  }
-  return c;
-}
-#else
-#include <intrin.h>
-#ifdef _WIN64
-#define __builtin_popcountl __popcnt64
-#else
-static unsigned int __builtin_popcountl(u64 n) {
-  return __popcnt((u32)n) + __popcnt((u32)(n >> 32));
-}
-#endif
-#endif
-#endif
 
 static f32 distance_hamming_u64(u64 *a, u64 *b, size_t n) {
   int same = 0;
