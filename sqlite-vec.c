@@ -5304,12 +5304,14 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
       if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
         sqlite3_finalize(stmt);
+        sqlite3_free(zSql);
         *pzErr = sqlite3_mprintf(
             "Could not create auxiliary shadow table: %s",
             sqlite3_errmsg(db));
 
         goto error;
       }
+      sqlite3_free(zSql);
       sqlite3_finalize(stmt);
     }
   }
@@ -8430,6 +8432,10 @@ done:
       goto cleanup;
     }
     *bufferChunksValidity = sqlite3_malloc(validitySize);
+    if (!*bufferChunksValidity) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
     rc = sqlite3_blob_read(*blobChunksValidity, (void *)*bufferChunksValidity,
                            validitySize, 0);
     if (rc != SQLITE_OK) {
@@ -8944,12 +8950,12 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     }
     sqlite3_str_appendall(s, ")");
     char * zSql = sqlite3_str_finish(s);
-    // TODO double check error handling ehre
     if(!zSql) {
       rc = SQLITE_NOMEM;
       goto cleanup;
     }
     rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
     if(rc != SQLITE_OK) {
       goto cleanup;
     }
