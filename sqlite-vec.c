@@ -2873,7 +2873,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
   int rc;
   npy_scanner_init(&scanner, header, headerLength);
 
-  if (npy_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_SOME &&
+  if (npy_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != NPY_TOKEN_TYPE_LBRACE) {
     vtab_set_error(pVTab,
                    NPY_PARSE_ERROR "numpy header did not start with '{'");
