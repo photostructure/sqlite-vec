@@ -3719,7 +3719,9 @@ void vec0_free_resources(vec0_vtab *p) {
 }
 
 /**
- * @brief Free all memory and sqlite3_stmt members of a vec0_vtab
+ * @brief Free a vec0_vtab and all its resources.
+ *
+ * Frees all internal allocations (strings, statements) and the struct itself.
  *
  * @param p vec0_vtab pointer
  */
@@ -3738,10 +3740,25 @@ void vec0_free(vec0_vtab *p) {
   for (int i = 0; i < p->numVectorColumns; i++) {
     sqlite3_free(p->shadowVectorChunksNames[i]);
     p->shadowVectorChunksNames[i] = NULL;
-
     sqlite3_free(p->vector_columns[i].name);
     p->vector_columns[i].name = NULL;
   }
+  for (int i = 0; i < p->numPartitionColumns; i++) {
+    sqlite3_free(p->paritition_columns[i].name);
+    p->paritition_columns[i].name = NULL;
+  }
+  for (int i = 0; i < p->numAuxiliaryColumns; i++) {
+    sqlite3_free(p->auxiliary_columns[i].name);
+    p->auxiliary_columns[i].name = NULL;
+  }
+  for (int i = 0; i < p->numMetadataColumns; i++) {
+    sqlite3_free(p->shadowMetadataChunksNames[i]);
+    p->shadowMetadataChunksNames[i] = NULL;
+    sqlite3_free(p->metadata_columns[i].name);
+    p->metadata_columns[i].name = NULL;
+  }
+
+  sqlite3_free(p);
 }
 
 int vec0_num_defined_user_columns(vec0_vtab *p) {
@@ -5319,7 +5336,6 @@ static int vec0Connect(sqlite3 *db, void *pAux, int argc,
 static int vec0Disconnect(sqlite3_vtab *pVtab) {
   vec0_vtab *p = (vec0_vtab *)pVtab;
   vec0_free(p);
-  sqlite3_free(p);
   return SQLITE_OK;
 }
 static int vec0Destroy(sqlite3_vtab *pVtab) {
@@ -5417,10 +5433,6 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
 done:
   sqlite3_finalize(stmt);
   vec0_free(p);
-  // If there was an error
-  if (rc == SQLITE_OK) {
-    sqlite3_free(p);
-  }
   return rc;
 }
 
