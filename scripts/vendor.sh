@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # SQLite version and expected SHA-256 checksum
-SQLITE_VERSION="3450300"
-SQLITE_YEAR="2024"
+SQLITE_VERSION="3510100"
+SQLITE_YEAR="2025"
 SQLITE_ZIP="sqlite-amalgamation-${SQLITE_VERSION}.zip"
 SQLITE_URL="https://www.sqlite.org/${SQLITE_YEAR}/${SQLITE_ZIP}"
-EXPECTED_SHA256="ea170e73e447703e8359308ca2e4366a3ae0c4304a8665896f068c736781c651"
+EXPECTED_SHA256="84a85d6a1b920234349f01720912c12391a4f0cb5cb998087e641dee3ef8ef2e"
 
 # Compute SHA-256 (works on both Linux and macOS)
 compute_sha256() {
