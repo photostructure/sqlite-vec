@@ -443,6 +443,38 @@ def test_vec_distance_cosine():
         abs_tol=1e-6
     )
 
+def test_vec_distance_cosine_zero_vector():
+    """Test that cosine distance handles zero vectors gracefully.
+
+    Cosine distance is mathematically undefined for zero vectors (division by zero).
+    We return 1.0 (maximum distance) when either vector is zero, rather than NaN/NULL.
+    """
+    vec_distance_cosine = lambda a, b: db.execute(
+        "select vec_distance_cosine(?, ?)", [a, b]
+    ).fetchone()[0]
+
+    # Zero vector vs non-zero vector should return 1.0 (max distance)
+    assert vec_distance_cosine("[0,0,0]", "[1,2,3]") == 1.0
+    assert vec_distance_cosine("[1,2,3]", "[0,0,0]") == 1.0
+
+    # Zero vector vs zero vector should also return 1.0
+    assert vec_distance_cosine("[0,0,0]", "[0,0,0]") == 1.0
+
+    # int8 zero vectors
+    vec_distance_cosine_int8 = lambda a, b: db.execute(
+        "select vec_distance_cosine(vec_int8(?), vec_int8(?))", [a, b]
+    ).fetchone()[0]
+    assert vec_distance_cosine_int8("[0,0,0]", "[1,2,3]") == 1.0
+    assert vec_distance_cosine_int8("[1,2,3]", "[0,0,0]") == 1.0
+
+    # bit zero vectors
+    vec_distance_cosine_bit = lambda a, b: db.execute(
+        "select vec_distance_cosine(vec_bit(?), vec_bit(?))", [a, b]
+    ).fetchone()[0]
+    assert vec_distance_cosine_bit(b"\x00", b"\xff") == 1.0
+    assert vec_distance_cosine_bit(b"\xff", b"\x00") == 1.0
+    assert vec_distance_cosine_bit(b"\x00", b"\x00") == 1.0
+
 def test_vec_distance_hamming():
     vec_distance_hamming = lambda *args: db.execute(
         "select vec_distance_hamming(vec_bit(?), vec_bit(?))", args

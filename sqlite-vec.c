@@ -587,6 +587,10 @@ static f32 distance_cosine_bit_u64(u64 *a, u64 *b, size_t n) {
     bMag += __builtin_popcountl(b[i]);
   }
 
+  // Handle zero vectors: return max distance (1.0) to avoid division by zero
+  if (aMag == 0 || bMag == 0) {
+    return 1.0f;
+  }
   return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
 }
 
@@ -601,6 +605,10 @@ static f32 distance_cosine_bit_u8(u8 *a, u8 *b, size_t n) {
     bMag += hamdist_table[b[i]];
   }
 
+  // Handle zero vectors: return max distance (1.0) to avoid division by zero
+  if (aMag == 0 || bMag == 0) {
+    return 1.0f;
+  }
   return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
 }
 
@@ -630,6 +638,10 @@ static f32 distance_cosine_float(const void *pVect1v, const void *pVect2v,
     pVect1++;
     pVect2++;
   }
+  // Handle zero vectors: return max distance (1.0) to avoid division by zero
+  if (aMag == 0 || bMag == 0) {
+    return 1.0f;
+  }
   return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
 }
 static f32 distance_cosine_int8(const void *pA, const void *pB,
@@ -647,6 +659,10 @@ static f32 distance_cosine_int8(const void *pA, const void *pB,
     bMag += *b * *b;
     a++;
     b++;
+  }
+  // Handle zero vectors: return max distance (1.0) to avoid division by zero
+  if (aMag == 0 || bMag == 0) {
+    return 1.0f;
   }
   return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
 }
