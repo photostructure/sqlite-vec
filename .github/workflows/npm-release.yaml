@@ -86,38 +86,7 @@ jobs:
 
       - name: Prepare release branch
         id: prepare
-        run: |
-          # Get current version from VERSION file (source of truth)
-          CURRENT=$(cat VERSION | tr -d '[:space:]')
-          echo "Current version: $CURRENT"
-
-          # Calculate new version using npm's semver
-          # Strip any prerelease suffix for the bump, then we'll keep it simple (no prerelease)
-          BASE_VERSION=$(echo "$CURRENT" | sed 's/-.*//')
-          NEW_VERSION=$(npx semver -i ${{ github.event.inputs.version }} "$BASE_VERSION")
-          echo "New version: $NEW_VERSION"
-
-          # Create release branch
-          BRANCH="release/v${NEW_VERSION}"
-          git checkout -b "$BRANCH"
-
-          # Update VERSION file
-          echo "$NEW_VERSION" > VERSION
-
-          # Regenerate sqlite-vec.h from template
-          make sqlite-vec.h
-
-          # Update package.json (without creating git commit/tag)
-          npm version "$NEW_VERSION" --no-git-tag-version
-
-          # Commit all version changes
-          git add VERSION sqlite-vec.h package.json package-lock.json
-          git commit -S -m "release: v${NEW_VERSION}"
-          git push origin "$BRANCH"
-
-          # Output for subsequent jobs
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        run: ./scripts/prepare-release.sh ${{ github.event.inputs.version }}
 
   build-linux-x64:
     needs: [prepare-release]
@@ -321,19 +290,6 @@ jobs:
           git-user-email: ${{ secrets.GIT_USER_EMAIL }}
 
       - run: npm install -g npm@latest
-
-      - name: Bump version and create signed tag
-        run: |
-          npm version ${{ github.event.inputs.version }} --sign-git-tag -m "release: %s"
-          echo "NEW_VERSION=$(npm pkg get version | tr -d '\"')" >> $GITHUB_ENV
-
-      - name: Push version commit and tag
-        run: git push origin main --follow-tags
-
-      - name: Create GitHub Release
-        run: gh release create "v${{ env.NEW_VERSION }}" --generate-notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to npm with OIDC
         run: |
