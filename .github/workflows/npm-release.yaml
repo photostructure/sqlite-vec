@@ -244,4 +244,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to npm with OIDC
-        run: npm publish --provenance --access public
+        run: |
+          VERSION="${{ env.NEW_VERSION }}"
+          # Extract prerelease identifier if present (e.g., "beta" from "1.0.0-beta.1")
+          if [[ "$VERSION" == *"-"* ]]; then
+            TAG=$(echo "$VERSION" | sed 's/.*-\([a-zA-Z]*\).*/\1/')
+            npm publish --provenance --access public --tag "$TAG"
+          else
+            npm publish --provenance --access public
+          fi
