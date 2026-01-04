@@ -18,9 +18,14 @@ name: "npm Release"
 # FIRST-TIME SETUP (required before this workflow will work):
 #
 # 1. Build and publish the package locally to create it on npm:
-#    ./scripts/vendor.sh make loadable mkdir -p dist/$(node -p "process.platform
-#    + '-' + process.arch") cp dist/vec0.* dist/$(node -p "process.platform +
-#    '-' + process.arch")/ npm login npm publish --access public
+#    ```sh
+#    ./scripts/vendor.sh
+#    make loadable
+#    mkdir -p dist/$(node -p "process.platform + '-' + process.arch")
+#    cp dist/vec0.* dist/$(node -p "process.platform + '-' + process.arch")/
+#    npm login
+#    npm publish --access public --tag alpha  # use --tag for prerelease versions
+#    ```
 #
 # 2. Configure OIDC trusted publishing on npmjs.com:
 #    - Go to https://www.npmjs.com/package/@USER/sqlite-vec/access
