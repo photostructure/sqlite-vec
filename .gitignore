@@ -39,3 +39,6 @@ poetry.lock
 
 memstat.c
 memstat.*
+
+sqlite-docs/
+node_modules/
