@@ -32,15 +32,19 @@ LOADABLE_EXTENSION=dylib
 # Let unresolved SQLite symbols resolve against host at load time
 # This is standard for SQLite loadable extensions on macOS.
 CFLAGS += -undefined dynamic_lookup
+# System libraries for linking (libdl for dynamic loading, libm for math)
+LDLIBS += -ldl -lm
 endif
 
 ifdef CONFIG_LINUX
 LOADABLE_EXTENSION=so
-LDLIBS += -lm
+# System libraries for linking (libdl for dynamic loading, libm for math)
+LDLIBS += -ldl -lm
 endif
 
 ifdef CONFIG_WINDOWS
 LOADABLE_EXTENSION=dll
+# Windows doesn't need -ldl (uses Win32 API) and math is linked by default
 endif
 
 
@@ -161,7 +165,7 @@ $(TARGET_CLI): sqlite-vec.h $(LIBS_DIR)/sqlite-vec.a $(LIBS_DIR)/shell.a $(LIBS_
 	$(CFLAGS) $(EXT_CFLAGS) \
 	$(EXT_LDFLAGS) \
 	examples/sqlite3-cli/core_init.c $(LIBS_DIR)/shell.a $(LIBS_DIR)/sqlite3.a $(LIBS_DIR)/sqlite-vec.a -o $@ \
-	-ldl -lm
+	$(LDLIBS)
 
 
 sqlite-vec.h: sqlite-vec.h.tmpl VERSION
@@ -251,7 +255,7 @@ $(prefix)/memory-test: tests/memory-test.c sqlite-vec.c vendor/sqlite3.c | $(pre
 		-DSQLITE_THREADSAFE=0 \
 		$(CFLAGS) $(EXT_CFLAGS) \
 		tests/memory-test.c sqlite-vec.c vendor/sqlite3.c -o $@ \
-		$(EXT_LDFLAGS) -ldl -lm
+		$(EXT_LDFLAGS) $(LDLIBS)
 
 # Run valgrind memory leak tests
 test-valgrind: $(prefix)/memory-test
