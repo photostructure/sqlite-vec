@@ -84,6 +84,105 @@ where contents_embedding match :query
 
 <!-- TODO match on vector column, k vs limit, distance_metric configurable, etc.-->
 
+## Filtering KNN Results
+
+You can combine `MATCH` queries with additional `WHERE` clauses to filter results.
+**Where you put your filter data determines when filtering happens.**
+
+### Filters applied DURING KNN search
+
+These constraints are evaluated while finding nearest neighbors:
+
+| Column Type | Supported Operators | Example |
+|-------------|---------------------|---------|
+| **Metadata columns** | `=`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `LIKE`, `GLOB`, `IS NULL`, `IS NOT NULL` | `AND category = 'electronics'` |
+| **Partition keys** | `=`, `!=`, `<`, `<=`, `>`, `>=` | `AND tenant_id = 123` |
+| **Distance** | `<`, `<=`, `>`, `>=` | `AND distance < 0.5` |
+| **Rowid** | `IN (...)` | `AND rowid IN (1, 2, 3)` |
+
+```sql
+-- Metadata filter: applied DURING search, guarantees up to k matching results
+create virtual table products using vec0(
+  embedding float[128],
+  category text  -- metadata column
+);
+
+select rowid, distance
+from products
+where embedding match :query
+  and k = 10
+  and category = 'electronics';  -- filtered during KNN search
+```
+
+### Filters applied AFTER KNN search
+
+Filters on **joined tables** or **subquery results** are applied after the KNN search returns.
+This means you may get **fewer than k results**.
+
+```sql
+-- ⚠️ JOIN filter: applied AFTER search, may return fewer than k results
+create virtual table products using vec0(embedding float[128]);
+create table categories (product_id integer primary key, category text);
+
+select p.rowid, p.distance, c.category
+from products p
+join categories c on p.rowid = c.product_id
+where p.embedding match :query
+  and k = 10
+  and c.category = 'electronics';  -- filtered AFTER KNN returns 10 rows
+```
+
+If KNN returns rowids `[0,1,2,3,4,5,6,7,8,9]` but only `[0,2,4,6,8]` are electronics,
+you get 5 results instead of 10.
+
+### Workarounds for JOIN filtering
+
+**Option 1: Use metadata columns** (recommended)
+
+Move filterable attributes into the `vec0` table as metadata columns:
+
+```sql
+create virtual table products using vec0(
+  embedding float[128],
+  category text  -- now a metadata column, filtered during search
+);
+```
+
+**Option 2: Over-fetch and limit**
+
+Request more results than needed, then filter and limit:
+
+```sql
+select p.rowid, p.distance, c.category
+from products p
+join categories c on p.rowid = c.product_id
+where p.embedding match :query
+  and k = 100  -- fetch extra
+  and c.category = 'electronics'
+limit 10;  -- then limit
+```
+
+This works but wastes computation and may still miss results if your filter
+is highly selective.
+
+### Auxiliary columns cannot filter KNN
+
+[Auxiliary columns](./vec0.md) (declared with `+` prefix) store data but are not indexed.
+They cannot be used in KNN `WHERE` clauses:
+
+```sql
+create virtual table products using vec0(
+  embedding float[128],
+  +description text  -- auxiliary: stored but not filterable
+);
+
+-- ❌ Error: auxiliary columns cannot filter KNN queries
+select * from products
+where embedding match :query and k = 10 and description like '%foo%';
+```
+
+Use auxiliary columns for data you need to retrieve, not filter.
+
 ## Manually with SQL scalar functions
 
 You don't need a `vec0` virtual table to perform KNN searches with `sqlite-vec`.
