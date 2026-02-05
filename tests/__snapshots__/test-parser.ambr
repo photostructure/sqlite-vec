@@ -1,0 +1,188 @@
+# serializer version: 1
+# name: TestAuxiliaryColumnParser.test_invalid_auxiliary_type[invalid auxiliary type]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse '+aux varchar'",
+  })
+# ---
+# name: TestAuxiliaryColumnParser.test_plus_without_name[plus without column name]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse '+ text'",
+  })
+# ---
+# name: TestAuxiliaryColumnParser.test_plus_without_type[auxiliary without type]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse '+aux'",
+  })
+# ---
+# name: TestMalformedDefinitions.test_double_comma[double comma]
+  OrderedDict({
+    'sql': 'create virtual table v using vec0(a float[4],, b float[4])',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: TestMalformedDefinitions.test_empty_definition[empty definition]
+  dict({
+    'error': 'OperationalError',
+    'message': 'vec0 constructor error: At least one vector column is required',
+  })
+# ---
+# name: TestMalformedDefinitions.test_just_comma[just comma]
+  dict({
+    'error': 'OperationalError',
+    'message': 'vec0 constructor error: At least one vector column is required',
+  })
+# ---
+# name: TestMalformedDefinitions.test_leading_comma[leading comma]
+  OrderedDict({
+    'sql': 'create virtual table v using vec0(, a float[4])',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: TestMalformedDefinitions.test_number_only[number only]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse '123'",
+  })
+# ---
+# name: TestMalformedDefinitions.test_only_whitespace[only whitespace]
+  dict({
+    'error': 'OperationalError',
+    'message': 'vec0 constructor error: At least one vector column is required',
+  })
+# ---
+# name: TestMalformedDefinitions.test_special_characters[special characters]
+  dict({
+    'error': 'OperationalError',
+    'message': 'unrecognized token: "@"',
+  })
+# ---
+# name: TestMalformedDefinitions.test_trailing_comma[trailing comma]
+  OrderedDict({
+    'sql': 'create virtual table v using vec0(a float[4],)',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: TestPartitionKeyParser.test_invalid_type[invalid partition key type]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'p blob partition key'",
+  })
+# ---
+# name: TestPartitionKeyParser.test_missing_key_keyword[missing key keyword]
+  OrderedDict({
+    'sql': 'create virtual table v using vec0(p int partition, a float[4])',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: TestPartitionKeyParser.test_missing_partition_keyword[missing partition keyword]
+  OrderedDict({
+    'sql': 'create virtual table v using vec0(p int key, a float[4])',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: TestPartitionKeyParser.test_missing_type[partition key missing type]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'p partition key'",
+  })
+# ---
+# name: TestPrimaryKeyParser.test_invalid_type[invalid primary key type]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'id blob primary key'",
+  })
+# ---
+# name: TestPrimaryKeyParser.test_missing_key_keyword[missing key keyword after primary]
+  OrderedDict({
+    'sql': 'create virtual table v using vec0(id int primary, a float[4])',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: TestPrimaryKeyParser.test_missing_primary_keyword[missing primary keyword]
+  OrderedDict({
+    'sql': 'create virtual table v using vec0(id int key, a float[4])',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: TestPrimaryKeyParser.test_missing_type[primary key missing type]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'id primary key'",
+  })
+# ---
+# name: TestTableOptionParser.test_extra_tokens_after_value[extra tokens after value]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: could not parse table option 'chunk_size=8 extra'",
+  })
+# ---
+# name: TestTableOptionParser.test_missing_equals_sign[missing equals sign]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'chunk_size 8'",
+  })
+# ---
+# name: TestTableOptionParser.test_missing_key[missing key before equals]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse '=8'",
+  })
+# ---
+# name: TestTableOptionParser.test_missing_value[missing value after equals]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: could not parse table option 'chunk_size='",
+  })
+# ---
+# name: TestVectorColumnParser.test_distance_metric_invalid_value[distance_metric invalid value]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: could not parse vector column 'a float[4] distance_metric=invalid'",
+  })
+# ---
+# name: TestVectorColumnParser.test_distance_metric_missing_equals[distance_metric missing equals]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: could not parse vector column 'a float[4] distance_metric l2'",
+  })
+# ---
+# name: TestVectorColumnParser.test_distance_metric_missing_value[distance_metric missing value]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: could not parse vector column 'a float[4] distance_metric='",
+  })
+# ---
+# name: TestVectorColumnParser.test_missing_dimensions[vector missing dimensions]
+  dict({
+    'error': 'OperationalError',
+    'message': 'vec0 constructor error: At least one vector column is required',
+  })
+# ---
+# name: TestVectorColumnParser.test_missing_type[vector missing type]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'a [4]'",
+  })
+# ---
+# name: TestVectorColumnParser.test_negative_dimensions[negative dimensions]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: could not parse vector column 'a float[-1]'",
+  })
+# ---
+# name: TestVectorColumnParser.test_zero_dimensions[zero dimensions]
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: could not parse vector column 'a float[0]'",
+  })
+# ---

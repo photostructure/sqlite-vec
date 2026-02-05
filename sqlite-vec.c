@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -448,7 +449,7 @@ static f32 l2_sqr_float(const void *pVect1v, const void *pVect2v,
     pVect2++;
     res += t * t;
   }
-  return sqrt(res);
+  return sqrtf(res);
 }
 
 static f32 l2_sqr_int8(const void *pA, const void *pB, const void *pD) {
@@ -463,7 +464,7 @@ static f32 l2_sqr_int8(const void *pA, const void *pB, const void *pD) {
     b++;
     res += t * t;
   }
-  return sqrt(res);
+  return sqrtf(res);
 }
 
 static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
@@ -591,7 +592,7 @@ static f32 distance_cosine_bit_u64(u64 *a, u64 *b, size_t n) {
   if (aMag == 0 || bMag == 0) {
     return 1.0f;
   }
-  return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
+  return 1 - (dot / (sqrtf(aMag) * sqrtf(bMag)));
 }
 
 static f32 distance_cosine_bit_u8(u8 *a, u8 *b, size_t n) {
@@ -609,7 +610,7 @@ static f32 distance_cosine_bit_u8(u8 *a, u8 *b, size_t n) {
   if (aMag == 0 || bMag == 0) {
     return 1.0f;
   }
-  return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
+  return 1 - (dot / (sqrtf(aMag) * sqrtf(bMag)));
 }
 
 static f32 distance_cosine_bit(const void *pA, const void *pB,
@@ -642,7 +643,7 @@ static f32 distance_cosine_float(const void *pVect1v, const void *pVect2v,
   if (aMag == 0 || bMag == 0) {
     return 1.0f;
   }
-  return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
+  return 1 - (dot / (sqrtf(aMag) * sqrtf(bMag)));
 }
 static f32 distance_cosine_int8(const void *pA, const void *pB,
                                 const void *pD) {
@@ -664,7 +665,7 @@ static f32 distance_cosine_int8(const void *pA, const void *pB,
   if (aMag == 0 || bMag == 0) {
     return 1.0f;
   }
-  return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
+  return 1 - (dot / (sqrtf(aMag) * sqrtf(bMag)));
 }
 
 static f32 distance_hamming_u8(u8 *a, u8 *b, size_t n) {
@@ -2047,7 +2048,7 @@ int vec0_parse_table_option(const char *source, int source_length,
   vec0_scanner_init(&scanner, source, source_length);
 
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2055,12 +2056,12 @@ int vec0_parse_table_option(const char *source, int source_length,
   keyLength = token.end - token.start;
 
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME && token.token_type != TOKEN_TYPE_EQ) {
+  if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_EQ) {
     return SQLITE_EMPTY;
   }
 
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       !((token.token_type == TOKEN_TYPE_IDENTIFIER) ||
         (token.token_type == TOKEN_TYPE_DIGIT))) {
     return SQLITE_ERROR;
@@ -2103,7 +2104,7 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
 
   // Check first token is identifier, will be the column name
   int rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2113,7 +2114,7 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
 
   // Check the next token matches "text" or "integer", as column type
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2130,7 +2131,7 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
 
   // Check the next token is identifier and matches "partition"
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2140,7 +2141,7 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
 
   // Check the next token is identifier and matches "key"
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2186,7 +2187,7 @@ int vec0_parse_auxiliary_column_definition(const char *source, int source_length
   }
 
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2196,7 +2197,7 @@ int vec0_parse_auxiliary_column_definition(const char *source, int source_length
 
   // Check the next token matches "text" or "integer", as column type
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2318,7 +2319,7 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
 
   // Check first token is identifier, will be the column name
   int rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2328,7 +2329,7 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
 
   // Check the next token matches "text" or "integer", as column type
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2345,7 +2346,7 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
 
   // Check the next token is identifier and matches "primary"
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2355,7 +2356,7 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
 
   // Check the next token is identifier and matches "key"
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2525,7 +2526,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
       }
       // ensure equal sign after distance_metric
       rc = vec0_scanner_next(&scanner, &token);
-      if (rc != VEC0_TOKEN_RESULT_SOME && token.token_type != TOKEN_TYPE_EQ) {
+      if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_EQ) {
         return SQLITE_ERROR;
       }
 
@@ -9463,7 +9464,7 @@ int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
   char *pzError;
   size_t dimensions;
   enum VectorElementType elementType;
-  void *vector;
+  void *vector = NULL;
   vector_cleanup cleanup = vector_cleanup_noop;
   // https://github.com/asg017/sqlite-vec/issues/53
   rc = vector_from_value(valueVector, &vector, &dimensions, &elementType,
@@ -9539,7 +9540,7 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
   i64 chunk_id;
   i64 chunk_offset;
 
-  i64 rowid;
+  i64 rowid = 0;
   if (p->pkIsText) {
     const char *a = (const char *)sqlite3_value_text(argv[0]);
     const char *b = (const char *)sqlite3_value_text(argv[1]);

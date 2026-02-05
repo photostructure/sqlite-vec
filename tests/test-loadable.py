@@ -421,7 +421,12 @@ def test_vec_distance_cosine():
     check([1.2, 0.1], [0.4, -0.4])
     check([-1.2, -0.1], [-0.4, 0.4])
     check([1, 2, 3], [-9, -8, -7], dtype=np.int8)
-    assert vec_distance_cosine("[1.1, 1.0]", "[1.2, 1.2]") == 0.001131898257881403
+    # Use isclose since sqrtf precision differs from sqrt
+    assert isclose(
+        vec_distance_cosine("[1.1, 1.0]", "[1.2, 1.2]"),
+        npy_cosine(np.array([1.1, 1.0], dtype=np.float32), np.array([1.2, 1.2], dtype=np.float32)),
+        abs_tol=1e-6
+    )
 
     vec_distance_cosine_bit = lambda *args: db.execute(
         "select vec_distance_cosine(vec_bit(?), vec_bit(?))", args
@@ -2555,14 +2560,18 @@ def test_vec0_distance_metric():
         {"rowid": 2, "distance": 10},
         {"rowid": 3, "distance": 14},
     ]
-    # consine
-    assert execute_all(
+    # cosine (use isclose for sqrtf precision)
+    cosine_results = execute_all(
         db, "select rowid, distance from v4 where a match ? and k = 3", [q]
-    ) == [
+    )
+    expected_cosine = [
         {"rowid": 3, "distance": 1.9734171628952026},
         {"rowid": 2, "distance": 1.9838699102401733},
         {"rowid": 1, "distance": 2},
     ]
+    for actual, expected in zip(cosine_results, expected_cosine):
+        assert actual["rowid"] == expected["rowid"]
+        assert isclose(actual["distance"], expected["distance"], abs_tol=1e-6)
 
 
 def test_vec0_vacuum():
