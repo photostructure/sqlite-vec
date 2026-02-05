@@ -8666,6 +8666,38 @@ cleanup:
   return rc;
 }
 
+/**
+ * @brief Execute a metadata text SQL statement (INSERT/UPDATE/DELETE).
+ *
+ * This helper handles the prepare→bind→step→finalize→free pattern for
+ * metadata text data operations. Takes ownership of zSql and frees it.
+ *
+ * @param db SQLite database connection
+ * @param zSql SQL string allocated by sqlite3_mprintf (will be freed)
+ * @param rowid Row ID to bind to parameter 1
+ * @param text Text data to bind to parameter 2, or NULL for DELETE
+ * @param text_len Length of text data (ignored if text is NULL)
+ * @return SQLITE_OK on success, error code on failure
+ */
+static int vec0_exec_metadata_text_sql(sqlite3 *db, char *zSql, i64 rowid,
+                                       const char *text, int text_len) {
+  sqlite3_stmt *stmt;
+  int rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) {
+    sqlite3_free(zSql);
+    return rc;
+  }
+  sqlite3_bind_int64(stmt, 1, rowid);
+  if (text) {
+    sqlite3_bind_text(stmt, 2, text, text_len, SQLITE_STATIC);
+  }
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  sqlite3_free(zSql);
+
+  return (rc == SQLITE_DONE) ? SQLITE_OK : SQLITE_ERROR;
+}
+
 int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid, i64 chunk_id, i64 chunk_offset, sqlite3_value * v, int isupdate) {
   int rc;
   struct Vec0MetadataColumnDefinition * metadata_column = &p->metadata_columns[metadata_column_idx];
@@ -8757,8 +8789,7 @@ int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid, 
 
       rc = sqlite3_blob_write(blobValue, &view, VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH, chunk_offset * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH);
       if(n > VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        const char * zSql;
-
+        char *zSql;
         if(isupdate && (prev_n > VEC0_METADATA_TEXT_VIEW_DATA_LENGTH)) {
           zSql = sqlite3_mprintf("UPDATE " VEC0_SHADOW_METADATA_TEXT_DATA_NAME " SET data = ?2 WHERE rowid = ?1", p->schemaName, p->tableName, metadata_column_idx);
         }else {
@@ -8768,38 +8799,19 @@ int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid, 
           rc = SQLITE_NOMEM;
           goto done;
         }
-        sqlite3_stmt * stmt;
-        rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+        rc = vec0_exec_metadata_text_sql(p->db, zSql, rowid, s, n);
         if(rc != SQLITE_OK) {
-          goto done;
-        }
-        sqlite3_bind_int64(stmt, 1, rowid);
-        sqlite3_bind_text(stmt, 2, s, n, SQLITE_STATIC);
-        rc = sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-
-        if(rc != SQLITE_DONE) {
-          rc = SQLITE_ERROR;
           goto done;
         }
       }
       else if(prev_n > VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        const char * zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_METADATA_TEXT_DATA_NAME " WHERE rowid = ?", p->schemaName, p->tableName, metadata_column_idx);
+        char *zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_METADATA_TEXT_DATA_NAME " WHERE rowid = ?", p->schemaName, p->tableName, metadata_column_idx);
         if(!zSql) {
           rc = SQLITE_NOMEM;
           goto done;
         }
-        sqlite3_stmt * stmt;
-        rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+        rc = vec0_exec_metadata_text_sql(p->db, zSql, rowid, NULL, 0);
         if(rc != SQLITE_OK) {
-          goto done;
-        }
-        sqlite3_bind_int64(stmt, 1, rowid);
-        rc = sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-
-        if(rc != SQLITE_DONE) {
-          rc = SQLITE_ERROR;
           goto done;
         }
       }
@@ -8839,6 +8851,7 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
   void *vectorDatas[VEC0_MAX_VECTOR_COLUMNS];
   // Array to hold cleanup functions for vectorDatas[]
   vector_cleanup cleanups[VEC0_MAX_VECTOR_COLUMNS];
+  memset(cleanups, 0, sizeof(cleanups));
 
   sqlite3_value * partitionKeyValues[VEC0_MAX_PARTITION_COLUMNS];
 
@@ -9052,7 +9065,9 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
 
 cleanup:
   for (int i = 0; i < numReadVectors; i++) {
-    cleanups[i](vectorDatas[i]);
+    if (cleanups[i]) {
+      cleanups[i](vectorDatas[i]);
+    }
   }
   sqlite3_free((void *)bufferChunksValidity);
   int brc = sqlite3_blob_close(blobChunksValidity);
@@ -9326,23 +9341,15 @@ int vec0Update_Delete_ClearMetadata(vec0_vtab *p, int metadata_idx, i64 rowid, i
       }
 
       if(n > VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        const char * zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_METADATA_TEXT_DATA_NAME " WHERE rowid = ?", p->schemaName, p->tableName, metadata_idx);
+        char *zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_METADATA_TEXT_DATA_NAME " WHERE rowid = ?", p->schemaName, p->tableName, metadata_idx);
         if(!zSql) {
           rc = SQLITE_NOMEM;
           goto done;
         }
-        sqlite3_stmt * stmt;
-        rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+        rc = vec0_exec_metadata_text_sql(p->db, zSql, rowid, NULL, 0);
         if(rc != SQLITE_OK) {
           goto done;
         }
-        sqlite3_bind_int64(stmt, 1, rowid);
-        rc = sqlite3_step(stmt);
-        if(rc != SQLITE_DONE) {
-          rc = SQLITE_ERROR;
-          goto done;
-        }
-        sqlite3_finalize(stmt);
       }
       break;
     }
@@ -10548,7 +10555,10 @@ static int vec_static_blob_entriesOpen(sqlite3_vtab *p,
 
 static int vec_static_blob_entriesClose(sqlite3_vtab_cursor *cur) {
   vec_static_blob_entries_cursor *pCur = (vec_static_blob_entries_cursor *)cur;
-  sqlite3_free(pCur->knn_data);
+  if (pCur->knn_data) {
+    sbe_query_knn_data_clear(pCur->knn_data);
+    sqlite3_free(pCur->knn_data);
+  }
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
