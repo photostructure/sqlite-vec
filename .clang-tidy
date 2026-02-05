@@ -1,0 +1,44 @@
+---
+# clang-tidy configuration for sqlite-vec
+# See: https://clang.llvm.org/extra/clang-tidy/
+
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -misc-no-recursion,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -readability-isolate-declaration,
+  -readability-identifier-naming,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+# Don't treat warnings as errors (informational only)
+WarningsAsErrors: ''
+
+# Header filter (analyze headers in this project)
+HeaderFilterRegex: '.*sqlite-vec\.h'
+
+# Check options
+CheckOptions:
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-function-size.LineThreshold
+    value: '200'
+  - key: readability-function-size.StatementThreshold
+    value: '150'
+  - key: cppcoreguidelines-avoid-do-while.IgnoreMacros
+    value: 'true'
