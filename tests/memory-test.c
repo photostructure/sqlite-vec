@@ -12,6 +12,7 @@
 #include "../sqlite-vec.h"
 #include "../vendor/sqlite3.h"
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
