@@ -3,19 +3,17 @@
 [![](https://dcbadge.vercel.app/api/server/VCtQ8cGhUs)](https://discord.gg/Ve7WeCJFXk)
 
 > [!NOTE]
-> **Community Fork Notice:** This is a temporary fork of [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec)
-> - Created to merge pending upstream PRs and provide community support while the original author is unavailable.
-> - Once development resumes on the original repository, users are encouraged to switch back.
-> - All credit for the original implementation goes to [Alex Garcia](https://github.com/asg017).
-> - Credit for creating the fork and merging PRs goes to [Vlad Lasky](https://github.com/vlasky).
-> 
-> This branch includes:
-> - Hardening (replaced atoi() with strtol(), vendor.sh SHA validation, pinned GHA versions, OIDC releases)
-> - Update to the latest SQLite release (should be no-op, and backward compatible)
-> - Node.js release added Alpine/MUSL x64/arm64 and Windows arm64 prebuilds
-> - Node.js package now includes all prebuilds (no post-install scripts!)
-
-> Feel free to cherry-pick any changes back upstream -- commits are kept small and isolated for this purpose.
+> **Community Fork:** This fork of [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) merges pending upstream PRs and provides continued maintenance while the original repository is inactive.
+>
+> Credits: [Alex Garcia](https://github.com/asg017) (original implementation), [Vlad Lasky](https://github.com/vlasky) (merged 15+ pending upstream PRs).
+>
+> **Fork improvements:**
+> - Security hardening (safe integer parsing, vendor checksum validation, pinned CI actions, OIDC releases)
+> - Fixed multiple memory leaks via AddressSanitizer/Valgrind testing (see [CHANGELOG](CHANGELOG-mceachen.md))
+> - Node.js: added Alpine/musl and Windows ARM64 prebuilds, all platforms bundled (no post-install scripts)
+> - Updated to latest SQLite release
+>
+> Commits are kept small for easy cherry-picking back upstream.
 
 An extremely small, "fast enough" vector search SQLite extension that runs
 anywhere! A successor to [`sqlite-vss`](https://github.com/asg017/sqlite-vss)
