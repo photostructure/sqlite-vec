@@ -589,6 +589,251 @@ cleanup:
   return result;
 }
 
+static int test_repeated_knn_queries(void) {
+  printf("Testing repeated KNN queries with cursor cleanup...\n");
+  sqlite3 *db = NULL;
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  int result = 1;
+
+  rc = sqlite3_open(":memory:", &db);
+  CHECK_OK(rc, "open database");
+
+  // Create a vec0 table
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE test_vecs USING vec0("
+                    "  embedding float[4]"
+                    ")",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "create vec0 table");
+
+  // Insert vectors
+  for (int i = 1; i <= 50; i++) {
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO test_vecs(rowid, embedding) VALUES (%d, '[%d,%d,%d,%d]')",
+             i, i, i*2, i*3, i*4);
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    CHECK_OK(rc, "insert vector");
+  }
+
+  // Query with KNN multiple times
+  // This exercises the cursor cleanup paths including knn_data
+  for (int iter = 0; iter < 30; iter++) {
+    rc = sqlite3_prepare_v2(
+        db,
+        "SELECT rowid, distance FROM test_vecs "
+        "WHERE embedding MATCH '[1,2,3,4]' AND k = 10",
+        -1, &stmt, NULL);
+    CHECK_OK(rc, "prepare KNN query");
+
+    int count = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      count++;
+    }
+    if (rc != SQLITE_DONE) {
+      fprintf(stderr, "FAILED: KNN iteration (rc=%d)\n", rc);
+      goto cleanup;
+    }
+    if (count != 10) {
+      fprintf(stderr, "FAILED: expected 10 results, got %d\n", count);
+      goto cleanup;
+    }
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+  }
+
+  // Cleanup
+  rc = sqlite3_exec(db, "DROP TABLE test_vecs", NULL, NULL, NULL);
+  CHECK_OK(rc, "drop table");
+
+  printf("  PASS: repeated KNN queries\n");
+  result = 0;
+
+cleanup:
+  if (stmt)
+    sqlite3_finalize(stmt);
+  if (db)
+    sqlite3_close(db);
+  return result;
+}
+
+static int test_long_text_metadata_updates(void) {
+  printf("Testing long text metadata updates...\n");
+  sqlite3 *db = NULL;
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  int result = 1;
+
+  rc = sqlite3_open(":memory:", &db);
+  CHECK_OK(rc, "open database");
+
+  // Create table with text metadata column
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE docs USING vec0("
+                    "  embedding float[4],"
+                    "  description text"
+                    ")",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "create vec0 table with text metadata");
+
+  // Create long text that exceeds VEC0_METADATA_TEXT_VIEW_DATA_LENGTH
+  // to trigger the prepare_v2 path that had the leak
+  char long_text[500];
+  memset(long_text, 'A', sizeof(long_text) - 1);
+  long_text[sizeof(long_text) - 1] = '\0';
+
+  // Insert with long text
+  rc = sqlite3_prepare_v2(
+      db,
+      "INSERT INTO docs(rowid, embedding, description) VALUES (?, ?, ?)",
+      -1, &stmt, NULL);
+  CHECK_OK(rc, "prepare insert with long text");
+
+  for (int i = 1; i <= 30; i++) {
+    float vec[4] = {(float)i, (float)i, (float)i, (float)i};
+    sqlite3_bind_int64(stmt, 1, i);
+    sqlite3_bind_blob(stmt, 2, vec, sizeof(vec), SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, long_text, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    CHECK_DONE(rc, "insert with long text");
+    sqlite3_reset(stmt);
+  }
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  // Update with different long text (exercises UPDATE path)
+  memset(long_text, 'B', sizeof(long_text) - 1);
+  rc = sqlite3_prepare_v2(
+      db,
+      "UPDATE docs SET description = ? WHERE rowid = ?",
+      -1, &stmt, NULL);
+  CHECK_OK(rc, "prepare update with long text");
+
+  for (int i = 1; i <= 30; i++) {
+    sqlite3_bind_text(stmt, 1, long_text, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, i);
+    rc = sqlite3_step(stmt);
+    CHECK_DONE(rc, "update with long text");
+    sqlite3_reset(stmt);
+  }
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  // Update to short text to trigger DELETE of long text data
+  // (when text becomes short enough, the long text data should be deleted)
+  rc = sqlite3_prepare_v2(
+      db,
+      "UPDATE docs SET description = 'short' WHERE rowid = ?",
+      -1, &stmt, NULL);
+  CHECK_OK(rc, "prepare update to short text");
+
+  for (int i = 1; i <= 30; i++) {
+    sqlite3_bind_int64(stmt, 1, i);
+    rc = sqlite3_step(stmt);
+    CHECK_DONE(rc, "update to short text");
+    sqlite3_reset(stmt);
+  }
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  // Cleanup
+  rc = sqlite3_exec(db, "DROP TABLE docs", NULL, NULL, NULL);
+  CHECK_OK(rc, "drop table");
+
+  printf("  PASS: long text metadata updates\n");
+  result = 0;
+
+cleanup:
+  if (stmt)
+    sqlite3_finalize(stmt);
+  if (db)
+    sqlite3_close(db);
+  return result;
+}
+
+static int test_insert_with_multiple_vectors(void) {
+  printf("Testing INSERT with multiple vector columns...\n");
+  sqlite3 *db = NULL;
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  int result = 1;
+
+  rc = sqlite3_open(":memory:", &db);
+  CHECK_OK(rc, "open database");
+
+  // Create table with multiple vector columns
+  // This exercises the cleanup array that needed initialization
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE multi USING vec0("
+                    "  vec1 float[4],"
+                    "  vec2 float[4],"
+                    "  vec3 float[4]"
+                    ")",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "create vec0 table with multiple vectors");
+
+  // Insert rows with all vectors
+  rc = sqlite3_prepare_v2(
+      db,
+      "INSERT INTO multi(rowid, vec1, vec2, vec3) VALUES (?, ?, ?, ?)",
+      -1, &stmt, NULL);
+  CHECK_OK(rc, "prepare multi-vector insert");
+
+  for (int i = 1; i <= 30; i++) {
+    float v1[4] = {(float)i, (float)i, (float)i, (float)i};
+    float v2[4] = {(float)(i*2), (float)(i*2), (float)(i*2), (float)(i*2)};
+    float v3[4] = {(float)(i*3), (float)(i*3), (float)(i*3), (float)(i*3)};
+
+    sqlite3_bind_int64(stmt, 1, i);
+    sqlite3_bind_blob(stmt, 2, v1, sizeof(v1), SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 3, v2, sizeof(v2), SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 4, v3, sizeof(v3), SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    CHECK_DONE(rc, "insert multi-vector row");
+    sqlite3_reset(stmt);
+  }
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  // Query each vector column
+  for (int col = 1; col <= 3; col++) {
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "SELECT rowid FROM multi WHERE vec%d MATCH '[1,1,1,1]' AND k = 5",
+             col);
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    CHECK_OK(rc, "prepare query");
+
+    int count = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      count++;
+    }
+    if (rc != SQLITE_DONE) {
+      fprintf(stderr, "FAILED: vec%d query iteration (rc=%d)\n", col, rc);
+      goto cleanup;
+    }
+
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+  }
+
+  // Cleanup
+  rc = sqlite3_exec(db, "DROP TABLE multi", NULL, NULL, NULL);
+  CHECK_OK(rc, "drop table");
+
+  printf("  PASS: INSERT with multiple vectors\n");
+  result = 0;
+
+cleanup:
+  if (stmt)
+    sqlite3_finalize(stmt);
+  if (db)
+    sqlite3_close(db);
+  return result;
+}
+
 int main(void) {
   printf("sqlite-vec memory test harness\n");
   printf("==============================\n\n");
@@ -610,6 +855,9 @@ int main(void) {
   failures += test_int8_vectors();
   failures += test_binary_vectors();
   failures += test_repeated_operations();
+  failures += test_repeated_knn_queries();
+  failures += test_long_text_metadata_updates();
+  failures += test_insert_with_multiple_vectors();
 
   printf("\n==============================\n");
   if (failures == 0) {

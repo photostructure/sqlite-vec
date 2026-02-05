@@ -10,7 +10,110 @@ permissions:
   contents: read
 
 jobs:
+  # Comprehensive memory testing across platforms
   memory-tests:
+    strategy:
+      fail-fast: false # Don't cancel other jobs if one fails
+      matrix:
+        include:
+          # Linux: Run all sanitizers + Valgrind
+          - os: ubuntu-latest
+            platform: linux
+            sanitizers: all
+          # macOS: Run ASan and UBSan (no Valgrind due to compatibility issues)
+          - os: macos-latest
+            platform: macos
+            sanitizers: asan-ubsan
+          # Windows: Run basic memory tests (no Valgrind/ASan)
+          - os: windows-latest
+            platform: windows
+            sanitizers: none
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      # Linux dependencies
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential valgrind clang clang-tidy
+
+      # macOS dependencies
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos'
+        run: |
+          # Clang is pre-installed on macOS runners
+          echo "Using system clang"
+          clang --version
+
+      # Windows dependencies
+      - name: Install Windows dependencies
+        if: matrix.platform == 'windows'
+        run: |
+          choco install llvm -y
+          refreshenv
+
+      # Vendor SQLite sources
+      - name: Vendor SQLite
+        run: ./scripts/vendor.sh
+        shell: bash
+
+      # Build and run basic memory test
+      - name: Build and run memory test binary
+        run: |
+          make dist/memory-test
+          ./dist/memory-test
+        shell: bash
+
+      # Linux: Run Valgrind
+      - name: Run Valgrind memory leak detection
+        if: matrix.platform == 'linux'
+        run: make test-valgrind
+        continue-on-error: false
+
+      # Linux & macOS: Run AddressSanitizer
+      - name: Run AddressSanitizer tests
+        if: matrix.sanitizers == 'all' || matrix.sanitizers == 'asan-ubsan'
+        run: make test-asan
+        env:
+          CC: clang
+
+      # Linux: Run UndefinedBehaviorSanitizer
+      - name: Run UndefinedBehaviorSanitizer tests
+        if: matrix.sanitizers == 'all' || matrix.sanitizers == 'asan-ubsan'
+        run: make test-ubsan
+        env:
+          CC: clang
+
+      # Linux: Run ThreadSanitizer
+      - name: Run ThreadSanitizer tests
+        if: matrix.sanitizers == 'all'
+        run: make test-tsan
+        env:
+          CC: clang
+        continue-on-error: true # TSan may have false positives with SQLite
+
+      # Upload artifacts on any result (success or failure)
+      - name: Upload memory test artifacts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: memory-test-logs-${{ matrix.platform }}
+          path: |
+            valgrind.log
+            asan-output.log
+            ubsan-output.log
+            tsan-output.log
+            core.*
+            dist/memory-test
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Static analysis with clang-tidy
+  static-analysis:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -18,25 +121,24 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential valgrind clang
+          sudo apt-get install -y clang-tidy bear build-essential
 
       - name: Vendor SQLite
         run: ./scripts/vendor.sh
 
-      - name: Run Valgrind memory tests
-        run: make test-valgrind
+      - name: Generate compile_commands.json
+        run: |
+          bear -- make clean all
 
-      - name: Run AddressSanitizer tests
-        run: make test-asan
-        env:
-          CC: clang
+      - name: Run clang-tidy
+        run: make lint-clang-tidy
+        continue-on-error: true
 
-      - name: Upload logs on failure
-        if: failure()
+      - name: Upload clang-tidy results
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: memory-test-logs
-          path: |
-            valgrind.log
-            asan-output.log
+          name: clang-tidy-results
+          path: clang-tidy-output.txt
+          if-no-files-found: ignore
           retention-days: 7

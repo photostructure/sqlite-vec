@@ -252,11 +252,27 @@ test-valgrind: $(prefix)/memory-test
 
 # Run AddressSanitizer tests (builds its own ASan-instrumented binary)
 test-asan:
-	@./scripts/sanitizers-test.sh
+	@./scripts/sanitizers-test.sh asan
+
+# Run UndefinedBehaviorSanitizer tests
+test-ubsan:
+	@./scripts/sanitizers-test.sh ubsan
+
+# Run ThreadSanitizer tests
+test-tsan:
+	@./scripts/sanitizers-test.sh tsan
+
+# Run clang-tidy static analysis
+lint-clang-tidy:
+	@./scripts/clang-tidy.sh
 
 # Run all memory tests
-test-memory: test-valgrind test-asan
+test-memory: test-valgrind test-asan test-ubsan
 	@echo "All memory tests completed"
+
+# Run absolutely all sanitizers and memory tests (includes TSan which may have false positives)
+test-memory-all: test-valgrind test-asan test-ubsan test-tsan
+	@echo "All memory and sanitizer tests completed"
 
 # ███████████████████████████████ END MEMORY TESTING ███████████████████████████
 

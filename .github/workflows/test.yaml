@@ -6,7 +6,23 @@ on:
 permissions:
   contents: read
 jobs:
+  # Quick memory check as a gate (runs on every PR)
+  memory-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang
+      - run: ./scripts/vendor.sh
+      - name: Run AddressSanitizer (quick memory check)
+        run: make test-asan
+        env:
+          CC: clang
+
   build-linux-x86_64-extension:
+    needs: memory-gate  # Require memory tests to pass
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
