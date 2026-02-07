@@ -3,6 +3,15 @@
 All notable changes specific to this community fork's releases will be documented here.
 For upstream changes, see [CHANGELOG.md](CHANGELOG.md).
 
+## [0.4.0] - 2026-02-07
+
+### Added
+
+- **Electron support** for packaged ASAR apps
+  - `getLoadablePath()` now resolves `app.asar` to `app.asar.unpacked` automatically
+  - Works transparently — no code changes needed in Electron apps
+  - Added README documentation with `electron-builder` and `electron-forge` configuration examples
+
 ## [0.3.3] - 2026-02-04
 
 ### Fixed

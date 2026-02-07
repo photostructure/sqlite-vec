@@ -113,6 +113,28 @@ For these, use the original packages until this fork's CI/CD is configured.
 
 See the [original documentation](https://alexgarcia.xyz/sqlite-vec/installation.html) for detailed usage information.
 
+## Electron
+
+The native extension is automatically resolved from `app.asar.unpacked` when running inside a packaged Electron app. You need to configure your build tool to unpack the extension binaries:
+
+**electron-builder:**
+
+```json
+{
+  "asarUnpack": ["node_modules/@mceachen/sqlite-vec/**/*.{so,dylib,dll}"]
+}
+```
+
+**electron-forge:**
+
+```js
+packagerConfig: {
+  asar: {
+    unpack: "*.{so,dylib,dll}"
+  }
+}
+```
+
 ## What's New
 
 See [CHANGELOG.md](CHANGELOG.md) for a complete list of improvements, bug fixes, and merged upstream PRs.

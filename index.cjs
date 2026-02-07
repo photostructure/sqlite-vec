@@ -24,6 +24,16 @@ function isMusl() {
   }
 }
 
+/**
+ * When running inside an Electron app packaged with ASAR, native extensions
+ * are unpacked to app.asar.unpacked/. Replace the path segment so
+ * db.loadExtension() can find the real file on disk.
+ * Outside Electron this is a no-op (paths never contain "app.asar").
+ */
+function asarUnpack(filePath) {
+  return filePath.replace("app.asar", "app.asar.unpacked");
+}
+
 function getLoadablePath() {
   // Platform-specific subdirectory (e.g., darwin-arm64, linux-x64, linux-x64-musl)
   const platformDir =
@@ -54,7 +64,7 @@ function getLoadablePath() {
     );
   }
 
-  return loadablePath;
+  return asarUnpack(loadablePath);
 }
 
 function load(db) {
