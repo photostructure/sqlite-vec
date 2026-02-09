@@ -29,7 +29,7 @@ Then, you can verify your installation was successful by embedding your first ve
 ```rs
 use sqlite_vec::sqlite3_vec_init;
 use rusqlite::{ffi::sqlite3_auto_extension, Result};
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 fn main()-> Result<()> {
     unsafe {
@@ -56,7 +56,7 @@ for a more complete Rust demo.
 
 ## Working with vectors in Rust
 
-If your vectors are provided as a `Vec<f32>` type, the [`zerocopy` crate](https://crates.io/crates/zerocopy) is recommended, specifically `zerocopy::AsBytes`.  This will allow you to pass in vectors into `sqlite-vec` without any copying.
+If your vectors are provided as a `Vec<f32>` type, the [`zerocopy` crate](https://crates.io/crates/zerocopy) is recommended, specifically `zerocopy::IntoBytes`.  This will allow you to pass in vectors into `sqlite-vec` without any copying.
 
 ```rs
 let query: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
