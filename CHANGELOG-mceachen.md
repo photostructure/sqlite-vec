@@ -3,6 +3,39 @@
 All notable changes specific to this community fork's releases will be documented here.
 For upstream changes, see [CHANGELOG.md](CHANGELOG.md).
 
+## [0.4.1] - 2026-02-09
+
+### Fixed
+
+- **Remaining memory leaks from upstream PR #258** ([`c9be38c`](https://github.com/mceachen/sqlite-vec/commit/c9be38c))
+  - `vec_eachFilter`: Fixed pzErrMsg leak when vector parsing fails with invalid input
+  - `vec_slice`: Fixed vector cleanup leaks in INT8 and BIT cases on malloc failure
+  - Changed early `return` to `goto done` to ensure cleanup functions are called
+  - These leaks only occurred in error paths (invalid input, OOM) not covered by existing tests
+
+### Added
+
+- **Rust example updates for zerocopy 0.8** ([`53aeaeb`](https://github.com/mceachen/sqlite-vec/commit/53aeaeb))
+  - Updated `examples/simple-rust/` to use zerocopy 0.8 API
+  - Changed `AsBytes` trait to `IntoBytes` (renamed in zerocopy 0.8)
+  - Updated documentation in `site/using/rust.md`
+  - Incorporates [upstream PR #244](https://github.com/asg017/sqlite-vec/pull/244)
+
+- **Comprehensive error path test coverage** ([`95cc6c8`](https://github.com/mceachen/sqlite-vec/commit/95cc6c8))
+  - New `tests/test-error-paths.py` with 30 tests targeting error-handling code paths
+  - Tests exercise error conditions that previously went untested (invalid inputs, NULL values, mismatched types/dimensions)
+  - Covers `vec_each`, `vec_slice`, `vec_distance_*`, `vec_add`, `vec_sub`, vec0 INSERT/KNN operations
+  - Repeated error operations test (50 iterations) to stress-test cleanup paths
+  - Ensures sanitizers (ASan/LSan) will catch any reintroduced memory leaks in error paths
+
+### Context
+
+This release completes the integration of upstream PR #258's memory leak fixes. Previous releases (0.3.2, 0.3.3) addressed most issues, but three error paths remained unfixed:
+- Error message allocation in `vec_each` with invalid vectors
+- Malloc failure handling in `vec_slice` for INT8/BIT vectors
+
+These paths were not detected by sanitizers because they were never executed by the test suite. The new error path tests ensure these code paths are now covered.
+
 ## [0.4.0] - 2026-02-07
 
 ### Added

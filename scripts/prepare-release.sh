@@ -1,29 +1,37 @@
 #!/usr/bin/env bash
 #
-# Prepare a release branch with version bumps.
+# Prepare a release branch using VERSION file as source of truth.
 #
-# Usage: ./scripts/prepare-release.sh <patch|minor|major>
-#        DRY_RUN=1 ./scripts/prepare-release.sh patch  # test without commit/push
+# Usage: ./scripts/prepare-release.sh
+#        DRY_RUN=1 ./scripts/prepare-release.sh  # test without commit/push
 #
 # This script:
-#   1. Reads current version from VERSION file
-#   2. Calculates new version using semver bump
+#   1. Reads version from VERSION file (must be bumped manually beforehand)
+#   2. Validates VERSION looks like valid semver
 #   3. Creates a release branch
-#   4. Updates VERSION, sqlite-vec.h, and package.json
+#   4. Syncs VERSION to sqlite-vec.h and package.json
 #   5. Commits and pushes the release branch
 #
 # Outputs (for GitHub Actions):
 #   - Writes branch=<name> and version=<version> to $GITHUB_OUTPUT if set
 #
-# Why this exists (replacing scripts/publish-release.sh):
+# Developer workflow:
+#   1. Manually bump VERSION file (e.g., 0.4.0 → 0.4.1)
+#   2. Update CHANGELOG-mceachen.md with changes
+#   3. Commit: git commit -am "release: prepare v0.4.1"
+#   4. Trigger npm-release.yaml workflow
+#   5. Workflow runs this script, builds, publishes, merges to main
 #
-#   The original publish-release.sh pushed version bumps to main BEFORE CI
-#   builds completed. If builds failed, main was left in an inconsistent state
-#   with a version tag pointing to broken artifacts.
+# Why VERSION is source of truth:
 #
-#   This script is part of a safer release flow:
+#   - Clear and transparent: "The version is whatever VERSION says"
+#   - Prepare releases: Update CHANGELOG for new version before workflow runs
+#   - Git history: Version bumps are explicit, visible commits
+#   - Standard practice: Similar to Go modules, Rust crates, etc.
 #
-#   1. RELEASE BRANCH ISOLATION: Version bumps happen on a release/vX.Y.Z
+# Why this release flow exists:
+#
+#   1. RELEASE BRANCH ISOLATION: VERSION sync happens on a release/vX.Y.Z
 #      branch. Main is untouched until everything succeeds.
 #
 #   2. CORRECT VERSION IN BINARIES: All platform builds check out the release
@@ -45,21 +53,16 @@
 #
 set -euo pipefail
 
-BUMP_TYPE="${1:-patch}"
+# Get version from VERSION file (source of truth)
+VERSION=$(cat VERSION | tr -d '[:space:]')
+echo "Releasing version: $VERSION"
 
-if [[ ! "$BUMP_TYPE" =~ ^(patch|minor|major)$ ]]; then
-  echo "Usage: $0 <patch|minor|major>" >&2
+# Validate VERSION looks like semver (basic check)
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+  echo "ERROR: VERSION file contains invalid semver: '$VERSION'" >&2
+  echo "Expected format: X.Y.Z or X.Y.Z-prerelease" >&2
   exit 1
 fi
-
-# Get current version from VERSION file (source of truth)
-CURRENT=$(cat VERSION | tr -d '[:space:]')
-echo "Current version: $CURRENT"
-
-# Calculate new version (strip prerelease suffix, then bump)
-BASE_VERSION=$(echo "$CURRENT" | sed 's/-.*//')
-NEW_VERSION=$(npx -y semver -i "$BUMP_TYPE" "$BASE_VERSION")
-echo "New version: $NEW_VERSION"
 
 # Create release branch
 BRANCH="release/v${NEW_VERSION}"
