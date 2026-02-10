@@ -65,28 +65,25 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
 fi
 
 # Create release branch
-BRANCH="release/v${NEW_VERSION}"
+BRANCH="release/v${VERSION}"
 git checkout -b "$BRANCH"
 
-# Update VERSION file
-echo "$NEW_VERSION" > VERSION
-
-# Regenerate sqlite-vec.h from template
+# Regenerate sqlite-vec.h from template (uses VERSION file)
 make sqlite-vec.h
 
-# Update package.json and package-lock.json
-npm version "$NEW_VERSION" --no-git-tag-version
+# Sync VERSION to package.json and package-lock.json
+npm version "$VERSION" --no-git-tag-version --allow-same-version
 npm install --package-lock-only
 
-# Commit all version changes
-git add VERSION sqlite-vec.h package.json package-lock.json
+# Commit version sync (VERSION should already be committed on main)
+git add sqlite-vec.h package.json package-lock.json
 
 if [[ -n "${DRY_RUN:-}" ]]; then
   echo ""
   echo "=== DRY RUN MODE ==="
-  echo "Would commit and push branch '$BRANCH' with version $NEW_VERSION"
+  echo "Would commit and push branch '$BRANCH' with version $VERSION"
   echo ""
-  echo "Files staged:"
+  echo "Files to be committed:"
   git diff --cached --name-only
   echo ""
   echo "To clean up:"
@@ -94,14 +91,21 @@ if [[ -n "${DRY_RUN:-}" ]]; then
   exit 0
 fi
 
-git commit -S -m "release: v${NEW_VERSION}"
+# Only commit if there are changes (VERSION might already be synced)
+if ! git diff --cached --quiet; then
+  git commit -S -m "release: sync package.json to v${VERSION}"
+  echo "Committed package.json sync for v${VERSION}"
+else
+  echo "No changes to commit (package.json already synced)"
+fi
+
 git push origin "$BRANCH"
 
 # Output for GitHub Actions
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-  echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 fi
 
 echo "Release branch '$BRANCH' created and pushed."
-echo "Version: $NEW_VERSION"
+echo "Version: $VERSION"

@@ -38,25 +38,21 @@ name: "npm Release"
 
 #
 # RELEASE FLOW:
-#   1. prepare-release: Creates a release branch, bumps VERSION/sqlite-vec.h/package.json
-#   2. build-*: All builds run from the release branch (with correct version baked in)
-#   3. publish-npm: Publishes to npm, then merges release branch to main on success
+#   1. Manually bump VERSION file and update CHANGELOG-mceachen.md on main
+#   2. prepare-release: Creates a release branch, syncs VERSION to sqlite-vec.h/package.json
+#   3. build-*: All builds run from the release branch (with correct version baked in)
+#   4. publish-npm: Publishes to npm, then merges release branch to main on success
 #
 # If any step fails, main is untouched and the release branch can be deleted.
+#
+# BEFORE TRIGGERING THIS WORKFLOW:
+#   - Bump VERSION file (e.g., 0.4.0 → 0.4.1)
+#   - Update CHANGELOG-mceachen.md with release notes
+#   - Commit to main: git commit -am "release: prepare v0.4.1"
 #
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version bump type"
-        required: false
-        type: choice
-        default: "patch"
-        options:
-          - patch
-          - minor
-          - major
 
 permissions:
   contents: read
@@ -86,7 +82,7 @@ jobs:
 
       - name: Prepare release branch
         id: prepare
-        run: ./scripts/prepare-release.sh ${{ github.event.inputs.version }}
+        run: ./scripts/prepare-release.sh
 
   build-linux-x64:
     needs: [prepare-release]
