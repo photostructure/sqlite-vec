@@ -1787,7 +1787,7 @@ static void vec_slice(sqlite3_context *context, int argc,
     i8 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
-      return;
+      goto done;
     }
     memset(out, 0, outSize);
     for (size_t i = 0; i < n; i++) {
@@ -1810,7 +1810,7 @@ static void vec_slice(sqlite3_context *context, int argc,
     u8 *out = sqlite3_malloc(outSize);
     if (!out) {
       sqlite3_result_error_nomem(context);
-      return;
+      goto done;
     }
     memset(out, 0, outSize);
     for (size_t i = 0; i < n / CHAR_BIT; i++) {
@@ -2677,6 +2677,7 @@ static int vec_eachFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   int rc = vector_from_value(argv[0], &pCur->vector, &pCur->dimensions,
                              &pCur->vector_type, &pCur->cleanup, &pzErrMsg);
   if (rc != SQLITE_OK) {
+    sqlite3_free(pzErrMsg);
     return SQLITE_ERROR;
   }
   pCur->iRowid = 0;
