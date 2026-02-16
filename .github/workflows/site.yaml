@@ -1,14 +1,9 @@
 name: Deploy Site
+
+# Disabled: this fork links to the upstream docs at https://alexgarcia.xyz/sqlite-vec/
+# instead of publishing its own documentation site.
 on:
   workflow_dispatch: {}
-  push:
-    branches:
-      - main
-    paths:
-      - "site/**"
-      - ".github/**"
-      - "VERSION"
-      - "reference.yaml"
 jobs:
   deploy:
     runs-on: ubuntu-latest
