@@ -167,6 +167,8 @@ limit 3;
 
 **How vector search works:** The `MATCH` operator finds vectors similar to your query vector. In the example above, `sample_embedding MATCH '[0.5, ...]'` searches for vectors closest to `[0.5, ...]` and returns them ordered by distance (smallest = most similar).
 
+Under the hood, sqlite-vec stores vectors in fixed-size chunks and scans each chunk to find the top-K nearest results, using SIMD instructions (AVX on x86_64, NEON on ARM) to accelerate distance calculations. Results from each chunk are merged using a two-pointer technique to produce the final sorted output. This brute-force approach trades theoretical optimality for simplicity and reliability — no complex index structures to maintain or tune.
+
 **Note:** All vector similarity queries require `LIMIT` or `k = ?` (where k is the number of nearest neighbors to return). This prevents accidentally returning too many results on large datasets, since finding all vectors within a distance threshold requires calculating distance to every vector in the table.
 
 ## Advanced Usage
@@ -343,6 +345,10 @@ As well as multiple individual supporters on
 
 If your company interested in sponsoring `sqlite-vec` development, send me an
 email to get more info: https://alexgarcia.xyz
+
+## Documentation
+
+For full API reference and guides, see the [upstream sqlite-vec documentation](https://alexgarcia.xyz/sqlite-vec/).
 
 ## See Also
 
