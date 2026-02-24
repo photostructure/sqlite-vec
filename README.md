@@ -10,12 +10,14 @@
 > **Credits:** [Alex Garcia](https://github.com/asg017) (original implementation), [Vlad Lasky](https://github.com/vlasky) (community fork with 15+ merged upstream PRs), PhotoStructure Inc. (ongoing maintenance and improvements).
 >
 > **Why this fork exists:**
+>
 > - PhotoStructure depends on sqlite-vec for production vector search in our photo management platform
 > - We've added production-critical features, security hardening, and comprehensive testing
 > - We're committed to maintaining this for as long as PhotoStructure exists
 > - All improvements remain open source (MIT/Apache-2.0) for the community
 >
 > **Fork improvements:**
+>
 > - **Testing:** AddressSanitizer/Valgrind/UBSan integration, 30+ error path tests, memory leak fixes
 > - **Security:** Safe integer parsing, vendor checksum validation, pinned CI actions, OIDC releases
 > - **Node.js:** Alpine/musl + Windows ARM64 prebuilds, bundled binaries (no post-install scripts)
@@ -65,8 +67,6 @@ Prebuilt binaries for all major platforms are published to npm:
 npm install @photostructure/sqlite-vec
 ```
 
-[![npm](https://img.shields.io/npm/v/@photostructure/sqlite-vec.svg?color=green&logo=nodedotjs&logoColor=white)](https://www.npmjs.com/package/@photostructure/sqlite-vec)
-
 **Supported platforms:** Linux (x64, ARM64, musl), macOS (x64, ARM64), Windows (x64, ARM64)
 
 ### Other Languages
@@ -90,7 +90,7 @@ The native extension is automatically resolved from `app.asar.unpacked` when run
 ```js
 packagerConfig: {
   asar: {
-    unpack: "*.{so,dylib,dll}"
+    unpack: "*.{so,dylib,dll}";
   }
 }
 ```
@@ -297,6 +297,7 @@ using WAL so the rewrite starts from a clean state.
 
 Development of the original `sqlite-vec` is supported by multiple generous sponsors! Mozilla
 is the main sponsor through the new Builders project.
+
 <p align="center">
   <a href="https://hacks.mozilla.org/2024/06/sponsoring-sqlite-vec-to-enable-more-powerful-local-ai-applications/">
   <picture>
