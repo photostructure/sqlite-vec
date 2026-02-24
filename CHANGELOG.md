@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1] - 2026-02-23
+
+### Infrastructure
+
+- Fixed Windows CI builds in `npm-release.yaml`: corrected MSVC flags (removed invalid GCC flags), fixed DLL output path, added security hardening for both x64 and ARM64
+- Removed unused upstream `release.yaml` (would have erroneously published to PyPI/RubyGems/crates.io)
+- Cleaned up Makefile: removed dead variables and phantom targets, added `loadable-msvc-x64`/`loadable-msvc-arm64` targets
+
 ## [1.0.0] - 2026-02-09
 
 ### Changed
