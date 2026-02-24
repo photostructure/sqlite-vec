@@ -49,7 +49,7 @@ jobs:
         shell: bash
       - run: make sqlite-vec.h
       - run: mkdir dist
-      - run: cl.exe /fPIC -shared /W4 /Ivendor/ /O2 /LD sqlite-vec.c -o dist/vec0.dll
+      - run: cl.exe /W4 /sdl /guard:cf /Qspectre /ZH:SHA_256 /Ivendor/ /O2 /LD sqlite-vec.c /Fedist/vec0.dll /link /DYNAMICBASE /NXCOMPAT /guard:cf /CETCOMPAT
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: sqlite-vec-windows-x86_64-extension
