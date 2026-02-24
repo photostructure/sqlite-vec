@@ -17,7 +17,7 @@
 #
 # Developer workflow:
 #   1. Manually bump VERSION file (e.g., 0.4.0 → 0.4.1)
-#   2. Update CHANGELOG-mceachen.md with changes
+#   2. Update CHANGELOG.md with changes
 #   3. Commit: git commit -am "release: prepare v0.4.1"
 #   4. Trigger npm-release.yaml workflow
 #   5. Workflow runs this script, builds, publishes, merges to main
