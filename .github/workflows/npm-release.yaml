@@ -2,8 +2,6 @@ name: "npm Release"
 
 # Fork-specific workflow for publishing to npm with OIDC
 
-# Separate from release.yaml to make merging upstream changes easier
-
 #
 # APPROACH: We bundle all platform binaries in a single npm package (like
 # prebuildify) rather than using platform-specific optionalDependencies (like
@@ -38,7 +36,7 @@ name: "npm Release"
 
 #
 # RELEASE FLOW:
-#   1. Manually bump VERSION file and update CHANGELOG-mceachen.md on main
+#   1. Manually bump VERSION file and update CHANGELOG.md on main
 #   2. prepare-release: Creates a release branch, syncs VERSION to sqlite-vec.h/package.json
 #   3. build-*: All builds run from the release branch (with correct version baked in)
 #   4. publish-npm: Publishes to npm, then merges release branch to main on success
@@ -186,8 +184,8 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - run: ./scripts/vendor.sh
         shell: bash
-      - run: mkdir dist
-      - run: cl.exe /fPIC -shared /W4 /Ivendor/ /O2 /LD sqlite-vec.c -o dist/vec0.dll
+      - run: make loadable-msvc-x64
+        shell: bash
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: win32-x64
@@ -205,8 +203,8 @@ jobs:
           arch: arm64
       - run: ./scripts/vendor.sh
         shell: bash
-      - run: mkdir dist
-      - run: cl.exe /fPIC -shared /W4 /Ivendor/ /O2 /LD sqlite-vec.c -o dist/vec0.dll
+      - run: make loadable-msvc-arm64
+        shell: bash
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: win32-arm64
