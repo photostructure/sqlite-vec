@@ -54,6 +54,26 @@ jobs:
         with:
           name: sqlite-vec-windows-x86_64-extension
           path: dist/*
+  build-windows-aarch64-extension:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: arm64
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+      - run: ./scripts/vendor.sh
+        shell: bash
+      - run: make sqlite-vec.h
+      - run: mkdir dist
+        # ARM64: /Qspectre and /CETCOMPAT are x64-only; omitted intentionally
+      - run: cl.exe /W4 /sdl /guard:cf /ZH:SHA_256 /Ivendor/ /O2 /LD sqlite-vec.c /Fedist/vec0.dll /link /DYNAMICBASE /NXCOMPAT /guard:cf
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: sqlite-vec-windows-aarch64-extension
+          path: dist/*
   build-linux-aarch64-extension:
     runs-on: ubuntu-24.04-arm
     steps:
@@ -188,6 +208,7 @@ jobs:
         build-macos-x86_64-extension,
         build-macos-aarch64-extension,
         build-windows-x86_64-extension,
+        build-windows-aarch64-extension,
         build-wasm32-emscripten,
         build-android-extensions,
         build-ios-extensions,
@@ -216,6 +237,10 @@ jobs:
         with:
           name: sqlite-vec-windows-x86_64-extension
           path: dist/windows-x86_64
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: sqlite-vec-windows-aarch64-extension
+          path: dist/windows-aarch64
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: sqlite-vec-wasm32-emscripten
