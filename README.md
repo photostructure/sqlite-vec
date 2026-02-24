@@ -1,6 +1,8 @@
 # `sqlite-vec`
 
-[![](https://dcbadge.vercel.app/api/server/VCtQ8cGhUs)](https://discord.gg/Ve7WeCJFXk)
+[![npm version](https://img.shields.io/npm/v/@photostructure/sqlite-vec.svg)](https://www.npmjs.com/package/@photostructure/sqlite-vec)
+[![Build & Test](https://github.com/photostructure/sqlite-vec/actions/workflows/test.yaml/badge.svg)](https://github.com/photostructure/sqlite-vec/actions/workflows/test.yaml)
+[![Memory Tests](https://github.com/photostructure/sqlite-vec/actions/workflows/memory-tests.yaml/badge.svg)](https://github.com/photostructure/sqlite-vec/actions/workflows/memory-tests.yaml)
 
 > [!NOTE]
 > **PhotoStructure's Production Fork:** This is [PhotoStructure](https://photostructure.com)'s actively maintained fork of [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec), optimized for production use with additional features, comprehensive testing, and ongoing maintenance funded by PhotoStructure Inc.
