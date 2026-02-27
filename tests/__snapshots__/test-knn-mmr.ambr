@@ -1,0 +1,243 @@
+# serializer version: 1
+# name: test_mmr_clustering
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.005062758922576904,
+      }),
+      OrderedDict({
+        'rowid': 3,
+        'distance': 0.011511921882629395,
+      }),
+      OrderedDict({
+        'rowid': 4,
+        'distance': 0.02060168981552124,
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'distance': 0.03227579593658447,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_clustering.1
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.005062758922576904,
+      }),
+      OrderedDict({
+        'rowid': 8,
+        'distance': 1.0,
+      }),
+      OrderedDict({
+        'rowid': 3,
+        'distance': 0.011511921882629395,
+      }),
+      OrderedDict({
+        'rowid': 4,
+        'distance': 0.02060168981552124,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_cosine_diversity
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.005062758922576904,
+      }),
+      OrderedDict({
+        'rowid': 3,
+        'distance': 0.020195960998535156,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_cosine_diversity.1
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.005062758922576904,
+      }),
+      OrderedDict({
+        'rowid': 3,
+        'distance': 0.020195960998535156,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_cosine_diversity.2
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.005062758922576904,
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'distance': 1.0,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_cosine_diversity.3
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'distance': 1.0,
+      }),
+      OrderedDict({
+        'rowid': 4,
+        'distance': 1.0,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_edge_cases
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_edge_cases.1
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ?',
+    'rows': list([
+    ]),
+  })
+# ---
+# name: test_mmr_error_invalid_lambda
+  dict({
+    'error': 'OperationalError',
+    'message': 'mmr_lambda value in knn query must be between 0.0 and 1.0, provided 1.500000',
+  })
+# ---
+# name: test_mmr_error_invalid_lambda.1
+  dict({
+    'error': 'OperationalError',
+    'message': 'mmr_lambda value in knn query must be between 0.0 and 1.0, provided -0.100000',
+  })
+# ---
+# name: test_mmr_insert_guard
+  dict({
+    'error': 'OperationalError',
+    'message': 'A value was provided for the hidden "mmr_lambda" column.',
+  })
+# ---
+# name: test_mmr_int8_vectors
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match vec_int8(?) and k = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 5.1021575927734375e-05,
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'distance': 1.0,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_l2_metric
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 3,
+        'distance': 0.028284257277846336,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.014142128638923168,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_with_distance_constraint
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and mmr_lambda = ? and distance > 0.001',
+    'rows': list([
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.005062758922576904,
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'distance': 1.0,
+      }),
+      OrderedDict({
+        'rowid': 3,
+        'distance': 0.020195960998535156,
+      }),
+    ]),
+  })
+# ---
+# name: test_mmr_with_partition_key
+  OrderedDict({
+    'sql': 'select rowid, distance from v where embedding match ? and k = ? and category = ? and mmr_lambda = ?',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'distance': 0.0,
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'distance': 0.005062758922576904,
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'distance': 1.0,
+      }),
+    ]),
+  })
+# ---
