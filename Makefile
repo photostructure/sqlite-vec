@@ -185,8 +185,8 @@ loadable-msvc-arm64: sqlite-vec.c sqlite-vec.h | $(prefix)
 .PHONY: test test-loadable test-loadable-snapshot-update test-snapshots-update \
         test-loadable-watch test-unit test-all
 
-test: loadable
-	sqlite3 :memory: '.read test.sql'
+test: cli
+	dist/sqlite3 :memory: '.read test.sql'
 
 test-loadable: loadable
 	$(PYTHON) -m pytest -vv -s -x tests/test-*.py
