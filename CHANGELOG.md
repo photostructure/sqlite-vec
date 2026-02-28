@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0] - 2026-02-27
+
+### Added
+
+- **MMR (Maximal Marginal Relevance) reranking for KNN queries** ([vlasky#6](https://github.com/vlasky/sqlite-vec/pull/6), rebased from [asg017#267](https://github.com/asg017/sqlite-vec/pull/267))
+  - New `mmr_lambda` hidden column on vec0 tables balances relevance vs. diversity
+  - `WHERE embedding MATCH ? AND k = 10 AND mmr_lambda = 0.5`
+  - Lambda range [0.0, 1.0]: 1.0 = pure relevance, 0.0 = pure diversity
+  - Supports all vector types (float32, int8, bit) and distance metrics
+  - Composes with distance constraints and partition keys
+  - Zero overhead when `mmr_lambda` is not used
+
+### Fixed
+
+- Fixed potential uninitialized memory read in MMR copy-back when fewer candidates are selected than requested
+- Fixed non-deterministic `test_shadow` snapshot (missing `ORDER BY` on `pragma_table_list`)
+
 ## [1.0.1] - 2026-02-23
 
 ### Infrastructure
