@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.1] - 2026-02-28
+
+### Fixed
+
+- Normalize MMR diversity term so `mmr_lambda` behaves consistently across L2/L1/cosine ([vlasky@8d4ef9e](https://github.com/vlasky/sqlite-vec/commit/8d4ef9eb393c4739ef540c4101d1bab377025141))
+
 ## [1.1.0] - 2026-02-27
 
 ### Added
