@@ -1,6 +1,6 @@
 {
   "name": "@photostructure/sqlite-vec",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "A vector search SQLite extension that runs anywhere - PhotoStructure's production-ready fork",
   "main": "./index.cjs",
   "module": "./index.mjs",
