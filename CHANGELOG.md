@@ -2,6 +2,10 @@
 
 ## [1.2.0] - 2026-07-06
 
+### Removed
+
+- Removed the in-tree Go bindings (`bindings/go/`) and the `build-ncruces-go` CI job. The CGO bindings were never published by this fork, and the `ncruces/go-sqlite3` WASM build broke when upstream migrated to [wasm2go](https://github.com/ncruces/wasm2go), which no longer supports injecting a custom C extension at build time. Go users should use upstream [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or `ncruces/go-sqlite3`'s built-in [`ext/vec1`](https://pkg.go.dev/github.com/ncruces/go-sqlite3/ext/vec1) extension.
+
 ### Fixed
 
 - Hardened the `optimize` command (`INSERT INTO t(t) VALUES('optimize')`) against a native crash on tables with metadata columns. `optimize` now validates each metadata chunk's blob size and slot offset before copying and fails as a catchable `SQLITE_ERROR` on malformed internal state, instead of risking heap corruption or a host-process abort (`EXC_BREAKPOINT`/`SIGTRAP`).

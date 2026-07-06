@@ -223,36 +223,6 @@ jobs:
         with:
           name: sqlite-vec-pyodide
           path: vec0.so
-  build-ncruces-go:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-      - run: make sqlite-vec.h
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          repository: ncruces/go-sqlite3
-          path: go-sqlite3
-      - run: git apply ../bindings/go/ncruces/go-sqlite3.patch
-        working-directory: go-sqlite3/
-      - run: |
-          mkdir -p tools/
-          [ -d "tools/wasi-sdk" ] || curl -#L "$WASI_SDK" | tar xzC tools &
-          [ -d "tools/binaryen" ] || curl -#L "$BINARYEN" | tar xzC tools &
-          wait
-
-          mv "tools/wasi-sdk"* "tools/wasi-sdk"
-          mv "tools/binaryen"* "tools/binaryen"
-
-          sqlite3/download.sh
-          embed/build.sh
-        env:
-          WASI_SDK: "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-23/wasi-sdk-23.0-x86_64-linux.tar.gz"
-          BINARYEN: "https://github.com/WebAssembly/binaryen/releases/download/version_118/binaryen-version_118-x86_64-linux.tar.gz"
-        working-directory: go-sqlite3/
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: sqlite-vec-ncruces-go
-          path: go-sqlite3/embed/sqlite3.wasm
   build-cosmopolitan:
     runs-on: ubuntu-latest
     steps:

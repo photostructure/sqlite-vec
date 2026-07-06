@@ -73,6 +73,9 @@ npm install @photostructure/sqlite-vec
 
 For Python, Ruby, Rust, Go, and other language bindings, see the original [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or [Vlad Lasky's fork](https://github.com/vlasky/sqlite-vec). This fork only publishes the Node.js package.
 
+> [!NOTE]
+> **Go bindings have been removed from this fork.** The in-tree Go binding sources (`bindings/go/`) and their CI were dropped: the CGO path was never published by this fork, and the `ncruces/go-sqlite3` WASM build broke when upstream migrated to [wasm2go](https://github.com/ncruces/wasm2go), which no longer supports injecting a custom C extension at build time. Go users should install from [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec), or use `ncruces/go-sqlite3`'s built-in [`ext/vec1`](https://pkg.go.dev/github.com/ncruces/go-sqlite3/ext/vec1) vector extension.
+
 ## Electron
 
 The native extension is automatically resolved from `app.asar.unpacked` when running inside a packaged Electron app. You need to configure your build tool to unpack the extension binaries:

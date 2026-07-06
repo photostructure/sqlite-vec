@@ -116,10 +116,7 @@ See ARCHITECTURE.md for detailed idxStr encoding and shadow table schemas.
 
 All bindings wrap the core C extension:
 
-- **Go CGO** (`bindings/go/cgo/`): CGO-based bindings for mattn/go-sqlite3
-  - `Auto()` function to register extension via `sqlite3_auto_extension()`
-  - `SerializeFloat32()` and `SerializeInt8()` helper functions
-  - Requires CGO enabled and links libm (`-lm`)
+- **Go**: Not supported by this fork. The in-tree Go bindings (`bindings/go/`) and their CI were removed — the CGO path was never published here, and the `ncruces/go-sqlite3` WASM build broke when upstream migrated to wasm2go. Go users should use upstream `asg017/sqlite-vec` or `ncruces/go-sqlite3`'s built-in `ext/vec1`.
 
 - **Python**: Installable via pip from GitHub
   - Package configuration in `pyproject.toml` and `setup.py`
