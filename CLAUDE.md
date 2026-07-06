@@ -168,22 +168,38 @@ Built with VitePress (Vue-based static site generator):
 
 ### Release Process
 
-**For this fork:**
+**For this fork:** releases are published to **npm** by the `npm Release`
+workflow ([.github/workflows/npm-release.yaml](.github/workflows/npm-release.yaml)),
+which bundles all platform binaries into a single `@photostructure/sqlite-vec`
+package and publishes with npm OIDC trusted publishing + provenance.
 
-1. Update `VERSION` file (format: `X.Y.Z` or `X.Y.Z-alpha.N`)
-2. Update `CHANGELOG.md` with changes
-3. Commit changes with descriptive message
-4. Create and push git tag:
-   ```bash
-   git tag v0.X.Y-alpha
-   git push origin v0.X.Y-alpha
-   ```
+Manual steps (on `main`):
 
-**Note:** This fork does not have CI/CD publishing to package registries (PyPI, npm, crates.io, RubyGems).
-Users install directly from GitHub using version tags.
+1. Bump the `VERSION` file (format: `X.Y.Z` or `X.Y.Z-prerelease`, e.g. `1.1.2` or `1.2.0-beta.1`)
+2. Update `CHANGELOG.md` with the release notes
+3. Commit: `git commit -am "release: prepare vX.Y.Z"`
+4. Trigger the `npm Release` workflow (`workflow_dispatch`, e.g. via `gh workflow run npm-release.yaml` or the Actions tab)
 
-**Original release process (for reference only):**
-The original repository uses `./scripts/publish-release.sh` and CI/CD (`.github/workflows/release.yaml`) to build and publish platform-specific extensions and language packages.
+The workflow then does the rest automatically:
+
+- Runs [scripts/prepare-release.sh](scripts/prepare-release.sh) to create a `release/vX.Y.Z`
+  branch and sync `VERSION` into `sqlite-vec.h`, `package.json`, and `package-lock.json`
+- Builds `vec0` binaries for all platforms (linux x64/arm64 glibc+musl, darwin x64/arm64, win32 x64/arm64) from that branch
+- Publishes to npm (prerelease versions get an `--tag` derived from the identifier, e.g. `beta`)
+- **Only on successful publish:** fast-forward merges the release branch to `main`,
+  creates a signed `vX.Y.Z` tag, pushes, deletes the release branch, and creates a
+  GitHub Release with auto-generated notes
+
+If any step fails, `main` is untouched and the `release/vX.Y.Z` branch can be deleted.
+
+**Note:** Do **not** create the git tag manually — the workflow creates the signed
+tag after publishing. Other language registries (PyPI, crates.io, RubyGems) are not
+published by this fork; those users install from GitHub.
+
+**Original upstream process (for reference only):**
+The original repository used `./scripts/publish-release.sh` with `sqlite-dist` to
+build and publish platform-specific extensions and language packages. That approach
+is not used here.
 
 ### Working with Tests
 
