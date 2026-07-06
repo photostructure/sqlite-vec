@@ -45,7 +45,7 @@ name: "npm Release"
 #
 # BEFORE TRIGGERING THIS WORKFLOW:
 #   - Bump VERSION file (e.g., 0.4.0 → 0.4.1)
-#   - Update CHANGELOG-mceachen.md with release notes
+#   - Update CHANGELOG.md with release notes
 #   - Commit to main: git commit -am "release: prepare v0.4.1"
 #
 
