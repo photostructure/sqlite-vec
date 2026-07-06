@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Hardened the `optimize` command (`INSERT INTO t(t) VALUES('optimize')`) against a native crash on tables with metadata columns. `optimize` now validates each metadata chunk's blob size and slot offset before copying and fails as a catchable `SQLITE_ERROR` on malformed internal state, instead of risking heap corruption or a host-process abort (`EXC_BREAKPOINT`/`SIGTRAP`).
+- Fixed a per-row memory leak of vector buffers during `optimize` (tens of MB on large compactions).
+- Fixed error-masking in the metadata-copy path that could report a failed copy as success, and a related blob-handle leak; guarded a latent double-free of the chunk-validity buffers.
+- `DELETE` now propagates metadata-clear failures instead of silently returning success.
+
 ## [1.1.1] - 2026-02-28
 
 ### Fixed

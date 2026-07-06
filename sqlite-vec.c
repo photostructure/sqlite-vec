@@ -9649,6 +9649,9 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
   // 6. delete metadata
   for(int i = 0; i < p->numMetadataColumns; i++) {
     rc = vec0Update_Delete_ClearMetadata(p, i, rowid, chunk_id, chunk_offset);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
   }
 
   return SQLITE_OK;
@@ -9879,6 +9882,33 @@ int vec0Update_SpecialInsert_OptimizeCopyMetadata(vec0_vtab *p, int metadata_col
     sqlite3_blob_close(srcBlob);
     return rc;
   }
+
+  // Defensive: both metadata chunk blobs must be exactly the size this column's
+  // kind implies, and both offsets must be valid slots in [0, chunk_size). On
+  // any mismatch, return SQLITE_ERROR instead of issuing a blob read/write
+  // against malformed state -- a recoverable error the caller can catch is
+  // always preferable to corrupting memory or aborting the host process.
+  i64 expectedSize = vec0_metadata_chunk_size(kind, p->chunk_size);
+  if (sqlite3_blob_bytes(srcBlob) != expectedSize ||
+      sqlite3_blob_bytes(dstBlob) != expectedSize) {
+    vtab_set_error(&p->base,
+                   "Internal error: metadata chunk blob size mismatch during "
+                   "optimize on %s, expected %lld",
+                   p->shadowMetadataChunksNames[metadata_column_idx],
+                   (i64)expectedSize);
+    rc = SQLITE_ERROR;
+    goto done;
+  }
+  if (src_chunk_offset < 0 || src_chunk_offset >= p->chunk_size ||
+      dst_chunk_offset < 0 || dst_chunk_offset >= p->chunk_size) {
+    vtab_set_error(&p->base,
+                   "Internal error: metadata chunk offset out of range during "
+                   "optimize on %s",
+                   p->shadowMetadataChunksNames[metadata_column_idx]);
+    rc = SQLITE_ERROR;
+    goto done;
+  }
+
   switch (kind) {
     case VEC0_METADATA_COLUMN_KIND_BOOLEAN: {
       u8 srcBlock, dstBlock;
@@ -9940,13 +9970,20 @@ int vec0Update_SpecialInsert_OptimizeCopyMetadata(vec0_vtab *p, int metadata_col
       break;
     }
   }
-done:
-  rc = sqlite3_blob_close(srcBlob);
+done: {
+  // Always close both blobs, but do not let a successful close overwrite a
+  // real read/write/validation error (the previous code masked the error with
+  // the srcBlob close result, and leaked dstBlob when the srcBlob close failed).
+  int rcSrcClose = sqlite3_blob_close(srcBlob);
+  int rcDstClose = sqlite3_blob_close(dstBlob);
   if (rc == SQLITE_OK) {
-    rc = sqlite3_blob_close(dstBlob);
+    rc = rcSrcClose;
   }
-
+  if (rc == SQLITE_OK) {
+    rc = rcDstClose;
+  }
   return rc;
+}
 }
 
 int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
@@ -9955,6 +9992,12 @@ int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
   const char *zSql;
   i64 prev_max_chunk_rowid = -1;
   sqlite3_value *partitionKeyValues[VEC0_MAX_PARTITION_COLUMNS];
+  // Declared here (not inside the loop) and zero-initialized so the cleanup
+  // label -- reached by gotos from before and inside the loop -- can safely
+  // free whatever an error path still owns, without leaking or double-freeing.
+  sqlite3_blob *blobChunksValidity = NULL;
+  const unsigned char *bufferChunksValidity = NULL;
+  void *vectorDatas[VEC0_MAX_VECTOR_COLUMNS] = {0};
 
   // 1) get the current maximum chunk_id
   zSql = sqlite3_mprintf("SELECT max(rowid) FROM " VEC0_SHADOW_CHUNKS_NAME, p->schemaName, p->tableName);
@@ -10022,9 +10065,6 @@ int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
 
   i64 rowid, chunk_id, chunk_offset;
   i64 new_chunk_id, new_chunk_offset;
-  sqlite3_blob *blobChunksValidity = NULL;
-  const unsigned char *bufferChunksValidity = NULL;
-  void *vectorDatas[VEC0_MAX_VECTOR_COLUMNS];
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     rowid = sqlite3_column_int64(stmt, 0);
     chunk_id = sqlite3_column_int64(stmt, 1);
@@ -10077,12 +10117,24 @@ int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
       goto cleanup;
     }
     sqlite3_free((void *)bufferChunksValidity);
+    bufferChunksValidity = NULL;
     if (sqlite3_blob_close(blobChunksValidity) != SQLITE_OK) {
+      // the handle is closed even on error; null it so cleanup won't re-close
+      blobChunksValidity = NULL;
       rc = SQLITE_ERROR;
       vtab_set_error(&p->base,
         VEC_INTERAL_ERROR "unknown error, blobChunksValidity could "
         "not be closed, please file an issue");
         goto cleanup;
+    }
+    blobChunksValidity = NULL;
+
+    // the per-row vector buffers were copied into the new chunk by
+    // vec0Update_InsertWriteFinalStep and are no longer needed; free them so
+    // they don't accumulate across a large optimize.
+    for (int i = 0; i < p->numVectorColumns; i++) {
+      sqlite3_free(vectorDatas[i]);
+      vectorDatas[i] = NULL;
     }
 
     // copy metadata from previous chunk to new chunk
@@ -10161,6 +10213,14 @@ int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
 cleanup:
   sqlite3_finalize(partition_key_stmt);
   sqlite3_finalize(stmt);
+  // Free anything an error path left owned. All of these are NULL on the normal
+  // completion path (freed + nulled inside the loop), so this is a no-op then
+  // and safe (sqlite3_free(NULL) / sqlite3_blob_close(NULL) are no-ops).
+  sqlite3_free((void *)bufferChunksValidity);
+  sqlite3_blob_close(blobChunksValidity);
+  for (int i = 0; i < VEC0_MAX_VECTOR_COLUMNS; i++) {
+    sqlite3_free(vectorDatas[i]);
+  }
 done:
   return rc;
 }
