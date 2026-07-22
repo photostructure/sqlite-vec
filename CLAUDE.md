@@ -229,6 +229,13 @@ Code uses preprocessor directives to select implementations. Distance calculatio
 - All bindings depend on the core C extension being built first
 - Vector format: JSON arrays `'[1,2,3]'` or raw bytes via helper functions
 
+**Public repository hygiene:** This is a public repo. Never commit user
+references, real names or handles, private local paths (e.g. `/home/<user>/…`,
+`ssh` host aliases), internal hostnames, or downstream-application investigation
+notes. Keep bug write-ups generic — refer to a reporter as "a downstream user"
+and describe schemas/repros abstractly. Detailed investigation notes containing
+any of the above belong in the relevant private repository, not here.
+
 **Fork-specific notes:**
 - Version v0.2.2-alpha includes: GLOB operator for text metadata (#191), IS/IS NOT/IS NULL/IS NOT NULL operators (#190), all compilation warnings fixed (including critical logic bug)
 - Version v0.2.1-alpha includes: LIKE operator for text metadata (#197), locale-independent JSON parsing (#241), musl libc compilation fix
