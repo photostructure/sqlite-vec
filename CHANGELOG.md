@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Removed
+
+- Removed the Python, Ruby, Rust, and Lua bindings, their packaging (`setup.py`, `pyproject.toml`, `MANIFEST.in`, `sqlite-vec.gemspec`, `extconf.rb`, `lib/sqlite_vec.rb`, `Cargo.toml`, `build.rs`, `src/lib.rs`, `bindings/`), and their examples. This fork publishes only the npm package. Installing those bindings from `main` (for example `pip install git+https://github.com/photostructure/sqlite-vec`, or the `gem` and `cargo --git` equivalents) no longer works; release tags up to v2.0.2 still include them. Use upstream [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or [`vlasky/sqlite-vec`](https://github.com/vlasky/sqlite-vec) instead.
+- Removed the `test.yaml` jobs that built iOS, wasm, pyodide, cosmopolitan, and 32-bit ARM artifacts that no release ships, and the Rust unit-test harness under `tests/`, which nothing ran.
+
 ## [2.0.2] - 2026-10-06
 
 Fixes wrong L2 distances between `int8` vectors in the darwin-arm64 binary. Binaries for the other platforms compute the same results as 2.0.1. Stored vectors are unaffected: distances are computed at query time, so upgrading corrects query results without rebuilding any table.

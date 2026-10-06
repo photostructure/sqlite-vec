@@ -18,3 +18,8 @@ dev = ["black==26.5.1"]
 # its `P14D` span in uv.lock, so an existing lock stays valid until it is
 # regenerated.
 exclude-newer = "14 days"
+
+[tool.black]
+# Pin the target so formatting doesn't change with black's newest-python
+# inference (see PY_FORMAT_FILES in ../Makefile).
+target-version = ["py312"]

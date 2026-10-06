@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Key features:
 - Supports float, int8, and binary vector types via `vec0` virtual tables
 - Pure C implementation with optional SIMD optimizations (AVX on x86_64, NEON on ARM)
-- Multi-language bindings (Python, Node.js, Ruby, Go, Rust, Lua)
+- Published as one npm package (`@photostructure/sqlite-vec`) with prebuilt binaries for eight platforms
 - Runs anywhere: Linux/MacOS/Windows, WASM, embedded devices
 - Distance constraints for KNN queries (enables pagination and range queries)
 - Optimize command for space reclamation after deletes
@@ -115,38 +115,17 @@ See ARCHITECTURE.md for detailed idxStr encoding and shadow table schemas.
 - Type constructors: `vec_f32()`, `vec_int8()`, `vec_bit()`
 - Utilities: `vec_length()`, `vec_normalize()`, `vec_slice()`, `vec_add()`, `vec_sub()`
 
-### Language Bindings
+### npm Package
 
-All bindings wrap the core C extension:
+This fork publishes only the Node.js package, `@photostructure/sqlite-vec`:
+- Package configuration in `package.json`
+- CJS (`index.cjs`) and ESM (`index.mjs`) entry points, which resolve
+  `dist/<platform>-<arch>[-musl]/vec0.<ext>`
+- TypeScript definitions in `index.d.ts`
 
-- **Go**: Not supported by this fork. The in-tree Go bindings (`bindings/go/`) and their CI were removed — the CGO path was never published here, and the `ncruces/go-sqlite3` WASM build broke when upstream migrated to wasm2go. Go users should use upstream `asg017/sqlite-vec` or `ncruces/go-sqlite3`'s built-in `ext/vec1`.
-
-- **Python**: Installable via pip from GitHub
-  - Package configuration in `pyproject.toml` and `setup.py`
-  - Helper functions in `bindings/python/extra_init.py` for vector serialization
-  - Requires Python built with `--enable-loadable-sqlite-extensions`
-  - Recommend using `uv` for virtual environments (uses system Python with extension support)
-
-- **Node.js**: Installable via npm from GitHub
-  - Package configuration in `package.json`
-  - CJS (`index.cjs`) and ESM (`index.mjs`) entry points
-  - TypeScript definitions in `index.d.ts`
-
-- **Ruby**: Installable via gem from GitHub
-  - Gem specification in `sqlite-vec.gemspec`
-  - Extension configuration in `extconf.rb`
-  - Ruby library in `lib/sqlite_vec.rb`
-
-- **Rust** (`bindings/rust/`): Static linking via build.rs
-  - Crate configuration in `Cargo.toml`
-  - Exports `sqlite3_vec_init()` in `src/lib.rs`
-
-- **Lua** (`bindings/lua/`): Lua 5.1+ compatible binding
-  - Requires `lsqlite3` module
-  - `load()` function to load the extension
-  - `serialize_f32()` for IEEE 754 binary format
-  - `serialize_json()` for JSON format
-  - Example in `examples/simple-lua/`
+Python, Ruby, Rust, Go, and Lua users should use upstream `asg017/sqlite-vec` or
+`vlasky/sqlite-vec`; this fork removed those bindings. For Go, `ncruces/go-sqlite3`
+also ships a built-in `ext/vec1` vector extension.
 
 ### Documentation Site
 
@@ -154,7 +133,7 @@ Built with VitePress (Vue-based static site generator):
 - `make site-dev` - Development server (or `npm --prefix site run dev`)
 - `make site-build` - Production build (or `npm --prefix site run build`)
 - Source: `site/` directory
-- Deployed via GitHub Actions (`.github/workflows/site.yaml`)
+- Not deployed: no workflow builds or publishes it (the site workflow was removed in `9b54d8a`)
 
 ## Development Workflow
 
@@ -202,8 +181,8 @@ npm dist-tag. Supported prerelease identifiers are `alpha`, `beta`, and `rc`;
 for example, `2.1.0-beta.1` uses the `beta` dist-tag.
 
 **Note:** Do **not** create the git tag manually — the workflow creates the signed
-tag after the pre-tag gate. Other language registries (PyPI, crates.io,
-RubyGems) are not published by this fork; those users install from GitHub.
+tag after the pre-tag gate. This fork publishes nothing to other language
+registries (PyPI, crates.io, RubyGems).
 
 The npm Trusted Publisher must use these exact settings:
 
@@ -220,9 +199,8 @@ disallow tokens**. In GitHub, use read-only default workflow permissions and
 enable immutable releases.
 
 **Original upstream process (for reference only):**
-The original repository used `./scripts/publish-release.sh` with `sqlite-dist` to
-build and publish platform-specific extensions and language packages. That approach
-is not used here.
+The original repository used `sqlite-dist` to build and publish platform-specific
+extensions and language packages. That approach is not used here.
 
 ### Working with Tests
 
@@ -252,8 +230,7 @@ Code uses preprocessor directives to select implementations. Distance calculatio
 - This is pre-v1 software - breaking changes are expected
 - The single-file architecture means recompiling for any change
 - Tests must run from repository root (assumes `dist/vec0` exists)
-- All bindings depend on the core C extension being built first
-- Vector format: JSON arrays `'[1,2,3]'` or raw bytes via helper functions
+- Vector format: JSON arrays `'[1,2,3]'` or raw bytes
 
 **Public repository hygiene:** This is a public repo. Never commit user
 references, real names or handles, private local paths (e.g. `/home/<user>/…`,
@@ -267,5 +244,4 @@ any of the above belong in the relevant private repository, not here.
 - Version v0.2.1-alpha includes: LIKE operator for text metadata (#197), locale-independent JSON parsing (#241), musl libc compilation fix
 - Version v0.2.0-alpha merged upstream PRs: #166 (distance constraints), #210 (optimize), #203 (ALTER TABLE RENAME), #212 (cosine distance for binary), #243 (delete memory leak fix), #228 (CI/CD updates)
 - See CHANGELOG.md for complete list of changes from original v0.1.7-alpha.2
-- Installation is via GitHub (git tags), not package registries
-- Python users should use `uv` for virtual environments to ensure loadable extension support
+- Installation is via npm (`@photostructure/sqlite-vec`); this fork publishes no other packages

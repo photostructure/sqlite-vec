@@ -74,7 +74,7 @@ npm install @photostructure/sqlite-vec
 For Python, Ruby, Rust, Go, and other language bindings, see the original [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or [Vlad Lasky's fork](https://github.com/vlasky/sqlite-vec). This fork only publishes the Node.js package.
 
 > [!NOTE]
-> **Go bindings have been removed from this fork.** The in-tree Go binding sources (`bindings/go/`) and their CI were dropped: the CGO path was never published by this fork, and the `ncruces/go-sqlite3` WASM build broke when upstream migrated to [wasm2go](https://github.com/ncruces/wasm2go), which no longer supports injecting a custom C extension at build time. Go users should install from [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec), or use `ncruces/go-sqlite3`'s built-in [`ext/vec1`](https://pkg.go.dev/github.com/ncruces/go-sqlite3/ext/vec1) vector extension.
+> **This fork no longer carries Python, Ruby, Rust, Lua, or Go bindings.** Installing them from this repository's `main` branch (for example `pip install git+https://github.com/photostructure/sqlite-vec`) no longer works; release tags up to v2.0.2 still include the Python, Ruby, Rust, and Lua bindings. Install them from [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or [Vlad Lasky's fork](https://github.com/vlasky/sqlite-vec) instead. Go users can also use `ncruces/go-sqlite3`'s built-in [`ext/vec1`](https://pkg.go.dev/github.com/ncruces/go-sqlite3/ext/vec1) vector extension. This fork dropped its Go bindings in v1.2.0, after the `ncruces/go-sqlite3` WASM build broke when it migrated to [wasm2go](https://github.com/ncruces/wasm2go), which no longer supports injecting a custom C extension at build time.
 
 ## Electron
 

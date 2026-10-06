@@ -263,7 +263,7 @@ lint-clang-tidy:
 
 FORMAT_FILES := sqlite-vec.h sqlite-vec.c
 # black lives in the test venv's dev group: `uv sync --directory tests`
-PY_FORMAT_FILES := $(wildcard tests/*.py) setup.py
+PY_FORMAT_FILES := $(wildcard tests/*.py)
 
 format: $(FORMAT_FILES)
 	clang-format -i $(FORMAT_FILES)
@@ -315,13 +315,10 @@ site-build:
 	npm --prefix site run build
 
 # ── misc ──────────────────────────────────────────────────────────────────────────
-.PHONY: progress publish-release
+.PHONY: progress
 
 progress:
 	deno run --allow-read=sqlite-vec.c scripts/progress.ts
-
-publish-release:
-	./scripts/publish-release.sh
 
 # ── WASM ──────────────────────────────────────────────────────────────────────────
 .PHONY: wasm

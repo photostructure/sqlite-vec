@@ -1,7 +1,0 @@
-# Lua bytecode
-*.luac
-
-# SQLite databases
-*.db
-*.sqlite
-*.sqlite3

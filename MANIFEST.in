@@ -1,3 +1,0 @@
-include vec0.so
-include vec0.dylib
-include vec0.dll
