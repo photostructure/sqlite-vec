@@ -67,6 +67,14 @@ make test-loadable-watch
 - `make test` - Run basic SQL tests via `test.sql`
 - `make test-unit` - Compile and run C unit tests
 - `sqlite3 :memory: '.read test.sql'` - Quick smoke test
+- `SQLITE_VEC_EXPECTED_BINARY=dist/<target>/vec0.<ext> tests/test-npm-package.sh <tarball>` -
+  Install a packed npm tarball into an empty project and check that both entry
+  points resolve and load that binary into `node:sqlite`. `release.yaml` runs it
+  on all eight release targets before tagging. A tarball packed at the repo root
+  fails it, because the entry points only look in `dist/<platform>-<arch>[-musl]/`.
+  To test a local build, copy `package.json`, `index.cjs`, `index.mjs`,
+  `index.d.ts`, `README.md`, and `dist/vec0.<ext>` (as `dist/<target>/vec0.<ext>`)
+  into an empty directory and run `npm pack --ignore-scripts` there.
 
 **Test structure:**
 - `tests/test-loadable.py` - Main comprehensive test suite
@@ -168,7 +176,8 @@ The workflow then does the rest automatically:
 - Runs [scripts/prepare-release.sh](scripts/prepare-release.sh) to create a `release/vX.Y.Z`
   branch and sync `VERSION` into `sqlite-vec.h`, `package.json`, and `package-lock.json`
 - Builds `vec0` binaries for all platforms (linux x64/arm64 glibc+musl, darwin x64/arm64, win32 x64/arm64) from that branch
-- Packs and verifies the complete npm tarball before tagging
+- Packs and verifies the complete npm tarball, then installs it on each of the
+  eight targets and runs `tests/test-npm-package.sh` against it, before tagging
 - Fast-forward merges the release branch to `main`, atomically pushes a signed
   `vX.Y.Z` tag, and dispatches `publish.yaml` at that exact tag
 - Rebuilds and packs the tagged source, then stages the package on npm

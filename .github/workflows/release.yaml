@@ -314,10 +314,91 @@ jobs:
       - name: Pack and verify the release candidate
         run: ./scripts/package-npm.sh rehearsal-package
 
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: rehearsal-package
+          path: rehearsal-package/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  # Install the release candidate on each target and load its binary through
+  # both entry points, so a tarball that resolves or loads the wrong binary
+  # never gets tagged.
+  verify-package:
+    name: Verify package on ${{ matrix.target }}
+    needs: [prepare-release, rehearse-package]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+            binary: dist/linux-x64/vec0.so
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            binary: dist/linux-arm64/vec0.so
+          - target: linux-x64-musl
+            runner: ubuntu-24.04
+            binary: dist/linux-x64-musl/vec0.so
+            docker-platform: linux/amd64
+          - target: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            binary: dist/linux-arm64-musl/vec0.so
+            docker-platform: linux/arm64
+          - target: darwin-x64
+            runner: macos-15-intel
+            binary: dist/darwin-x64/vec0.dylib
+          - target: darwin-arm64
+            runner: macos-14
+            binary: dist/darwin-arm64/vec0.dylib
+          - target: win32-x64
+            runner: windows-latest
+            binary: dist/win32-x64/vec0.dll
+          - target: win32-arm64
+            runner: windows-11-arm
+            binary: dist/win32-arm64/vec0.dll
+    env:
+      SQLITE_VEC_EXPECTED_BINARY: ${{ matrix.binary }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_branch }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: rehearsal-package
+          path: rehearsal-package
+
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        if: ${{ !matrix.docker-platform }}
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+
+      - name: Test the installed package
+        if: ${{ !matrix.docker-platform }}
+        shell: bash
+        run: tests/test-npm-package.sh rehearsal-package/*.tgz
+
+      - name: Test the installed package on Alpine
+        if: ${{ matrix.docker-platform }}
+        env:
+          DOCKER_PLATFORM: ${{ matrix.docker-platform }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/tmp/project:ro" \
+            -w /tmp/project \
+            -e SQLITE_VEC_EXPECTED_BINARY \
+            --platform "$DOCKER_PLATFORM" \
+            node:24.19.0-alpine3.23 \
+            sh tests/test-npm-package.sh rehearsal-package/*.tgz
+
   finalize-release:
     name: Create signed release tag
     runs-on: ubuntu-24.04
-    needs: [prepare-release, rehearse-package]
+    needs: [prepare-release, rehearse-package, verify-package]
     permissions:
       contents: write # Atomically push main and the signed release tag.
     outputs:

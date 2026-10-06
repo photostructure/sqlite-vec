@@ -7,6 +7,10 @@
 - Removed the Python, Ruby, Rust, and Lua bindings, their packaging (`setup.py`, `pyproject.toml`, `MANIFEST.in`, `sqlite-vec.gemspec`, `extconf.rb`, `lib/sqlite_vec.rb`, `Cargo.toml`, `build.rs`, `src/lib.rs`, `bindings/`), and their examples. This fork publishes only the npm package. Installing those bindings from `main` (for example `pip install git+https://github.com/photostructure/sqlite-vec`, or the `gem` and `cargo --git` equivalents) no longer works; release tags up to v2.0.2 still include them. Use upstream [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or [`vlasky/sqlite-vec`](https://github.com/vlasky/sqlite-vec) instead.
 - Removed the `test.yaml` jobs that built iOS, wasm, pyodide, cosmopolitan, and 32-bit ARM artifacts that no release ships, and the Rust unit-test harness under `tests/`, which nothing ran.
 
+### Infrastructure
+
+- `release.yaml` now installs the release-candidate tarball on all eight targets and runs `tests/test-npm-package.mjs` against it before tagging. The test checks that the ESM and CommonJS entry points resolve that target's binary, that `vec_version()` matches the package version, and that a `vec0` KNN query returns the nearest rows. Previously `scripts/package-npm.sh` checked only the tarball's name, version, and file list, and the linux-arm64, linux-x64-musl, linux-arm64-musl, and win32-arm64 binaries shipped without running on those platforms. `publish.yaml` still rebuilds the published binaries from the signed tag; this check runs the release-candidate build of that same commit.
+
 ## [2.0.2] - 2026-10-06
 
 Fixes wrong L2 distances between `int8` vectors in the darwin-arm64 binary. Binaries for the other platforms compute the same results as 2.0.1. Stored vectors are unaffected: distances are computed at query time, so upgrading corrects query results without rebuilding any table.
