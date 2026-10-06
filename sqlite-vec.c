@@ -313,8 +313,7 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
   size_t qty = *((size_t *)qty_ptr);
 
   const i8 *pEnd1 = pVect1 + qty;
-  int32x4_t acc_low = vdupq_n_s32(0);
-  int32x4_t acc_high = vdupq_n_s32(0);
+  int64x2_t acc = vdupq_n_s64(0);
 
   while (pVect1 < pEnd1 - 7) {
     // loading 8 at a time
@@ -324,13 +323,16 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
     pVect2 += 8;
 
     // the difference (up to ±255) fits in 16 bits, but its square (up to
-    // 65025) does not, so square with a widening multiply into 32 bits
+    // 65025) does not, so square with a widening multiply into 32 bits.
+    // A 32-bit lane holds two squares, but 33,026 of them overflow it, so
+    // the running sum is kept in 64-bit lanes.
     int16x8_t diff = vsubq_s16(vmovl_s8(v1), vmovl_s8(v2));
-    acc_low = vmlal_s16(acc_low, vget_low_s16(diff), vget_low_s16(diff));
-    acc_high = vmlal_high_s16(acc_high, diff, diff);
+    int32x4_t squares = vmull_s16(vget_low_s16(diff), vget_low_s16(diff));
+    squares = vmlal_high_s16(squares, diff, diff);
+    acc = vpadalq_s32(acc, squares);
   }
 
-  i32 sum_scalar = vaddvq_s32(vaddq_s32(acc_low, acc_high));
+  i64 sum_scalar = vaddvq_s64(acc);
 
   // handle leftovers
   while (pVect1 < pEnd1) {

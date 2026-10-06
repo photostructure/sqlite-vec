@@ -623,6 +623,13 @@ def test_vec_distance_l2():
     check([91] * 16, [-91] * 16, dtype=np.int8)
     # overflow in neon elements, plus a leftover element
     check([127] * 25, [-128] * 25, dtype=np.int8)
+    # check overflow of 32-bit sums. Squares of 128 (2^14) keep every partial
+    # sum exact in f32, so the scalar build matches exactly too.
+    # 131,769 squares sum past INT32_MAX:
+    check([64] * 131769, [-64] * 131769, dtype=np.int8)
+    # 2^34 in total; 32-bit partial sums of every 8th square reach 2^31, so
+    # widening only the final sum to 64 bits is not enough:
+    check([64] * 1048576, [-64] * 1048576, dtype=np.int8)
 
 
 def test_vec_length():
