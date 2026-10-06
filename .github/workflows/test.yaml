@@ -123,43 +123,6 @@ jobs:
       - uses: green-coding-solutions/eco-ci-energy-estimation@0fd2200a8f02d7939066c535e3642c2ebee9db16 # v5.2.0
         with:
           task: display-results
-  build-android-extensions:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        platforms:
-          [
-            { name: android-aarch64, cc: aarch64-linux-android21-clang },
-            { name: android-i686, cc: i686-linux-android21-clang },
-            { name: android-x86_64, cc: x86_64-linux-android21-clang },
-            { name: android-armv7a, cc: armv7a-linux-androideabi21-clang },
-          ]
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          persist-credentials: false
-      - run: ./scripts/vendor.sh
-      - uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
-        with:
-          java-version: "17"
-          distribution: "temurin"
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
-      - run: |
-          sdkmanager --install "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
-      - run: |
-          ls $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/
-          ls $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-      - run: |
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          make CC=${{ matrix.platforms.cc }} \
-             AR=llvm-ar \
-             RANLIB=llvm-ranlib \
-             STRIP=llvm-strip loadable
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: sqlite-vec-android-${{ matrix.platforms.name }}-extension
-          path: dist/*.so
   build-ios-extensions:
     runs-on: ${{ matrix.platforms.runner }}
     strategy:

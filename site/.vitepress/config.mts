@@ -158,7 +158,6 @@ function sidebar(): DefaultTheme.SidebarItem[] {
         { text: "Datasette", link: "/datasette" },
         { text: "sqlite-utils", link: "/sqlite-utils" },
         { text: "rqlite", link: "/rqlite" },
-        { text: "Android+iOS", link: "/android-ios" },
       ],
     },
     {
