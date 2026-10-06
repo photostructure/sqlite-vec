@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed L2 distance between `int8` vectors in NEON builds, which include the published darwin-arm64 binary. The NEON kernel squared each element difference in a 16-bit lane, and any difference of 182 or more (for example 127 against −128) overflows it, so `vec_distance_l2()` and `int8` KNN queries using L2 distance returned distances that were too small, or NULL when the wrapped sum went negative. Squares are now widened to 32 bits.
+- The NEON code now compiles with GCC, which rejects implicit conversions between signed and unsigned vector types, and includes `arm64_neon.h` under MSVC on ARM64. Release builds still enable NEON only on darwin-arm64.
+
 ## [2.0.1] - 2026-08-27
 
 No functional changes. The extension source, bindings, and packaged files are identical to 2.0.0 — this release only changes how the package is built and published.

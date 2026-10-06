@@ -617,6 +617,12 @@ def test_vec_distance_l2():
     check([1.2, 0.1], [0.4, -0.4])
     check([-1.2, -0.1], [-0.4, 0.4])
     check([1, 2, 3], [-9, -8, -7], dtype=np.int8)
+    # check overflow in neon elements: |a - b| >= 182 squares past INT16_MAX
+    check([127] * 16, [-128] * 16, dtype=np.int8)
+    check([-128, 127] * 8, [127, -128] * 8, dtype=np.int8)
+    check([91] * 16, [-91] * 16, dtype=np.int8)
+    # overflow in neon elements, plus a leftover element
+    check([127] * 25, [-128] * 25, dtype=np.int8)
 
 
 def test_vec_length():

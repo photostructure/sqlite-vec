@@ -239,7 +239,11 @@ static f32 l2_sqr_float_avx(const void *pVect1v, const void *pVect2v,
 #endif
 
 #ifdef SQLITE_VEC_ENABLE_NEON
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
+#include <arm64_neon.h>
+#else
 #include <arm_neon.h>
+#endif
 
 #define PORTABLE_ALIGN32 __attribute__((aligned(32)))
 
@@ -309,7 +313,8 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
   size_t qty = *((size_t *)qty_ptr);
 
   const i8 *pEnd1 = pVect1 + qty;
-  i32 sum_scalar = 0;
+  int32x4_t acc_low = vdupq_n_s32(0);
+  int32x4_t acc_high = vdupq_n_s32(0);
 
   while (pVect1 < pEnd1 - 7) {
     // loading 8 at a time
@@ -318,17 +323,14 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
     pVect1 += 8;
     pVect2 += 8;
 
-    // widen to protect against overflow
-    int16x8_t v1_wide = vmovl_s8(v1);
-    int16x8_t v2_wide = vmovl_s8(v2);
-
-    int16x8_t diff = vsubq_s16(v1_wide, v2_wide);
-    int16x8_t squared_diff = vmulq_s16(diff, diff);
-    int32x4_t sum = vpaddlq_s16(squared_diff);
-
-    sum_scalar += vgetq_lane_s32(sum, 0) + vgetq_lane_s32(sum, 1) +
-                  vgetq_lane_s32(sum, 2) + vgetq_lane_s32(sum, 3);
+    // the difference (up to ±255) fits in 16 bits, but its square (up to
+    // 65025) does not, so square with a widening multiply into 32 bits
+    int16x8_t diff = vsubq_s16(vmovl_s8(v1), vmovl_s8(v2));
+    acc_low = vmlal_s16(acc_low, vget_low_s16(diff), vget_low_s16(diff));
+    acc_high = vmlal_high_s16(acc_high, diff, diff);
   }
+
+  i32 sum_scalar = vaddvq_s32(vaddq_s32(acc_low, acc_high));
 
   // handle leftovers
   while (pVect1 < pEnd1) {
@@ -354,26 +356,32 @@ static i32 l1_int8_neon(const void *pVect1v, const void *pVect2v,
   int32x4_t acc3 = vdupq_n_s32(0);
   int32x4_t acc4 = vdupq_n_s32(0);
 
+  // vabdq_s8 returns |a - b| (up to 255) in signed lanes, so each difference
+  // is reinterpreted as unsigned before the widening pairwise adds
   while (pVect1 < pEnd1 - 63) {
     int8x16_t v1 = vld1q_s8(pVect1);
     int8x16_t v2 = vld1q_s8(pVect2);
-    int8x16_t diff1 = vabdq_s8(v1, v2);
-    acc1 = vaddq_s32(acc1, vpaddlq_u16(vpaddlq_u8(diff1)));
+    uint8x16_t diff1 = vreinterpretq_u8_s8(vabdq_s8(v1, v2));
+    acc1 =
+        vaddq_s32(acc1, vreinterpretq_s32_u32(vpaddlq_u16(vpaddlq_u8(diff1))));
 
     v1 = vld1q_s8(pVect1 + 16);
     v2 = vld1q_s8(pVect2 + 16);
-    int8x16_t diff2 = vabdq_s8(v1, v2);
-    acc2 = vaddq_s32(acc2, vpaddlq_u16(vpaddlq_u8(diff2)));
+    uint8x16_t diff2 = vreinterpretq_u8_s8(vabdq_s8(v1, v2));
+    acc2 =
+        vaddq_s32(acc2, vreinterpretq_s32_u32(vpaddlq_u16(vpaddlq_u8(diff2))));
 
     v1 = vld1q_s8(pVect1 + 32);
     v2 = vld1q_s8(pVect2 + 32);
-    int8x16_t diff3 = vabdq_s8(v1, v2);
-    acc3 = vaddq_s32(acc3, vpaddlq_u16(vpaddlq_u8(diff3)));
+    uint8x16_t diff3 = vreinterpretq_u8_s8(vabdq_s8(v1, v2));
+    acc3 =
+        vaddq_s32(acc3, vreinterpretq_s32_u32(vpaddlq_u16(vpaddlq_u8(diff3))));
 
     v1 = vld1q_s8(pVect1 + 48);
     v2 = vld1q_s8(pVect2 + 48);
-    int8x16_t diff4 = vabdq_s8(v1, v2);
-    acc4 = vaddq_s32(acc4, vpaddlq_u16(vpaddlq_u8(diff4)));
+    uint8x16_t diff4 = vreinterpretq_u8_s8(vabdq_s8(v1, v2));
+    acc4 =
+        vaddq_s32(acc4, vreinterpretq_s32_u32(vpaddlq_u16(vpaddlq_u8(diff4))));
 
     pVect1 += 64;
     pVect2 += 64;
@@ -382,8 +390,9 @@ static i32 l1_int8_neon(const void *pVect1v, const void *pVect2v,
   while (pVect1 < pEnd1 - 15) {
     int8x16_t v1 = vld1q_s8(pVect1);
     int8x16_t v2 = vld1q_s8(pVect2);
-    int8x16_t diff = vabdq_s8(v1, v2);
-    acc1 = vaddq_s32(acc1, vpaddlq_u16(vpaddlq_u8(diff)));
+    uint8x16_t diff = vreinterpretq_u8_s8(vabdq_s8(v1, v2));
+    acc1 =
+        vaddq_s32(acc1, vreinterpretq_s32_u32(vpaddlq_u16(vpaddlq_u8(diff))));
     pVect1 += 16;
     pVect2 += 16;
   }
