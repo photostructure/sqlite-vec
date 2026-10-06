@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [2.0.2] - 2026-10-06
+
+Fixes wrong L2 distances between `int8` vectors in the darwin-arm64 binary. Binaries for the other platforms compute the same results as 2.0.1. Stored vectors are unaffected: distances are computed at query time, so upgrading corrects query results without rebuilding any table.
 
 ### Fixed
 
