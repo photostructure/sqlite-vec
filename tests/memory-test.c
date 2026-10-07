@@ -986,6 +986,44 @@ cleanup:
   return result;
 }
 
+static int test_parser_edge_inputs(void) {
+  printf("Testing parser edge inputs...\n");
+  sqlite3 *db = NULL;
+  int rc;
+  int result = 1;
+
+  rc = sqlite3_open(":memory:", &db);
+  CHECK_OK(rc, "open database");
+
+  // Each input must fail cleanly. The JSON exponent used to overflow an int
+  // (UBSan), and the truncated definitions end where the vec0 constructor
+  // scanner expects another token.
+  const char *inputs[] = {
+      "SELECT vec_length('[1e99999999999999999999]')",
+      "CREATE VIRTUAL TABLE bad USING vec0(aa)",
+      "CREATE VIRTUAL TABLE bad USING vec0(aa float)",
+      "CREATE VIRTUAL TABLE bad USING vec0(bb text partition)",
+      "CREATE VIRTUAL TABLE bad USING vec0(cc text primary)",
+      "CREATE VIRTUAL TABLE bad USING vec0(chunk_size)",
+      "CREATE VIRTUAL TABLE bad USING vec0(chunk_size=)",
+  };
+  for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+    rc = sqlite3_exec(db, inputs[i], NULL, NULL, NULL);
+    if (rc == SQLITE_OK) {
+      fprintf(stderr, "FAILED: accepted invalid input: %s\n", inputs[i]);
+      goto cleanup;
+    }
+  }
+
+  printf("  PASS: parser edge inputs\n");
+  result = 0;
+
+cleanup:
+  if (db)
+    sqlite3_close(db);
+  return result;
+}
+
 int main(void) {
   printf("sqlite-vec memory test harness\n");
   printf("==============================\n\n");
@@ -1013,6 +1051,7 @@ int main(void) {
   failures += test_error_path_leaks();
   failures += test_unaligned_blob_vectors();
   failures += test_npy_unterminated_string();
+  failures += test_parser_edge_inputs();
 
   printf("\n==============================\n");
   if (failures == 0) {

@@ -123,7 +123,11 @@ static double strtod_c(const char *str, char **endptr) {
     }
 
     while (*p >= '0' && *p <= '9') {
-      exponent = exponent * 10 + (*p - '0');
+      // clamp: any exponent this large already over/underflows a double,
+      // and accumulating further would overflow the int itself
+      if (exponent < 10000) {
+        exponent = exponent * 10 + (*p - '0');
+      }
       p++;
     }
 
@@ -2518,7 +2522,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   // starts with an identifier
   rc = vec0_scanner_next(&scanner, &token);
 
-  if (rc != VEC0_TOKEN_RESULT_SOME &&
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
@@ -2547,13 +2551,13 @@ int vec0_parse_vector_column(const char *source, int source_length,
 
   // left '[' bracket
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME && token.token_type != TOKEN_TYPE_LBRACKET) {
+  if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_LBRACKET) {
     return SQLITE_EMPTY;
   }
 
   // digit, for vector dimension length
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME && token.token_type != TOKEN_TYPE_DIGIT) {
+  if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_DIGIT) {
     return SQLITE_ERROR;
   }
   errno = 0;
@@ -2567,7 +2571,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
 
   // // right ']' bracket
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME && token.token_type != TOKEN_TYPE_RBRACKET) {
+  if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_RBRACKET) {
     return SQLITE_ERROR;
   }
 
@@ -2580,7 +2584,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
       break;
     }
 
-    if (rc != VEC0_TOKEN_RESULT_SOME &&
+    if (rc != VEC0_TOKEN_RESULT_SOME ||
         token.token_type != TOKEN_TYPE_IDENTIFIER) {
       return SQLITE_ERROR;
     }
@@ -2601,7 +2605,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
 
       // distance_metric value, an identifier (L2, cosine, etc)
       rc = vec0_scanner_next(&scanner, &token);
-      if (rc != VEC0_TOKEN_RESULT_SOME &&
+      if (rc != VEC0_TOKEN_RESULT_SOME ||
           token.token_type != TOKEN_TYPE_IDENTIFIER) {
         return SQLITE_ERROR;
       }
