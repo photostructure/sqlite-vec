@@ -6616,6 +6616,133 @@ static int vec0_is_prefix_only_glob_pattern(const char *pattern, int n) {
   return 1;
 }
 
+// A KNN query's filters compare a constraint's value with a row's value by
+// SQLite's rules
+// (https://www.sqlite.org/datatype3.html#comparison_expressions). vec0 declares
+// its columns without a type, so SQLite converts neither value when it compares
+// one with a bound parameter or a literal: NULL compares with nothing, INTEGER
+// and REAL values compare numerically, every number is less than any TEXT, and
+// every TEXT is less than any BLOB. A filter sees only the value, not the
+// expression that produced it, so it compares every value this way. SQLite
+// itself converts a column's TEXT to a number when the other side has numeric
+// affinity, so a TEXT '5' equals CAST(5 AS INTEGER) in a plain scan but not in
+// a KNN query's filter.
+// A `distance` filter still rounds a numeric value to float before comparing.
+// vec0's `rowid` column is untyped too, so SQLite's own `rowid > '3'` matches
+// no row, but vec0's rowid lookups (`rowid = ?` without `match`, and a KNN
+// query's `rowid in (...)` of two or more values) apply numeric affinity to
+// the value first, as SQLite does for an INTEGER PRIMARY KEY, so '5' finds
+// rowid 5. In a KNN query SQLite compares `rowid = ?`, and a one-value
+// `rowid in (?)`, with the column itself.
+
+// Whether a comparison holds, given the sign of a row's value compared with
+// the constraint's value.
+static int vec0_metadata_operator_holds(vec0_metadata_operator op, int cmp) {
+  switch (op) {
+  case VEC0_METADATA_OPERATOR_EQ:
+  case VEC0_METADATA_OPERATOR_IS:
+    return cmp == 0;
+  case VEC0_METADATA_OPERATOR_NE:
+  case VEC0_METADATA_OPERATOR_ISNOT:
+    return cmp != 0;
+  case VEC0_METADATA_OPERATOR_LT:
+    return cmp < 0;
+  case VEC0_METADATA_OPERATOR_LE:
+    return cmp <= 0;
+  case VEC0_METADATA_OPERATOR_GT:
+    return cmp > 0;
+  case VEC0_METADATA_OPERATOR_GE:
+    return cmp >= 0;
+  default:
+    return 0;
+  }
+}
+
+// Compares an integer with a real exactly: negative, zero or positive as i is
+// less than, equal to or greater than r. This is SQLite's
+// sqlite3IntFloatCompare() (src/vdbeaux.c) without its NaN check; no NaN
+// reaches it, since SQLite stores a NaN as NULL.
+static int vec0_compare_i64_double(i64 i, double r) {
+  if (r < -9223372036854775808.0)
+    return 1;
+  if (r >= 9223372036854775808.0)
+    return -1;
+  i64 y = (i64)r;
+  if (i < y)
+    return -1;
+  if (i > y)
+    return 1;
+  double s = (double)i;
+  return (s < r) ? -1 : (s > r);
+}
+
+// The integer a value equals: an INTEGER, or a REAL without a fraction inside
+// i64's range. Returns 0 for any other value, which equals no integer.
+static int vec0_value_as_i64(sqlite3_value *value, i64 *out) {
+  switch (sqlite3_value_type(value)) {
+  case SQLITE_INTEGER:
+    *out = sqlite3_value_int64(value);
+    return 1;
+  case SQLITE_FLOAT: {
+    double r = sqlite3_value_double(value);
+    if (r < -9223372036854775808.0 || r >= 9223372036854775808.0)
+      return 0;
+    i64 y = (i64)r;
+    if (vec0_compare_i64_double(y, r) != 0)
+      return 0;
+    *out = y;
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+// The rowid a value equals after numeric affinity, as SQLite applies it to a
+// value compared with an INTEGER PRIMARY KEY. Returns 0 when it equals no
+// rowid. Like sqlite3VdbeIntegerAffinity(), it reads no REAL as -2^63.
+static int vec0_value_as_rowid(sqlite3_value *value, i64 *rowid) {
+  sqlite3_value_numeric_type(value);
+  return vec0_value_as_i64(value, rowid) &&
+         (sqlite3_value_type(value) == SQLITE_INTEGER || *rowid != INT64_MIN);
+}
+
+// The result a metadata constraint gives every row when its value decides it
+// alone, or -1 when each row's value must be compared with it.
+static int vec0_metadata_constant_result(vec0_metadata_column_kind kind,
+                                         vec0_metadata_operator op,
+                                         sqlite3_value *value) {
+  if (op == VEC0_METADATA_OPERATOR_IN || op == VEC0_METADATA_OPERATOR_ISNULL ||
+      op == VEC0_METADATA_OPERATOR_ISNOTNULL) {
+    return -1;
+  }
+  int type = sqlite3_value_type(value);
+  if (type == SQLITE_NULL) {
+    // no metadata value is NULL, so only IS NOT holds against one
+    return op == VEC0_METADATA_OPERATOR_ISNOT;
+  }
+  if (op == VEC0_METADATA_OPERATOR_LIKE || op == VEC0_METADATA_OPERATOR_GLOB) {
+    // LIKE and GLOB read any pattern as text
+    return -1;
+  }
+  if (kind == VEC0_METADATA_COLUMN_KIND_TEXT) {
+    if (type == SQLITE_TEXT)
+      return -1;
+    return vec0_metadata_operator_holds(op, type == SQLITE_BLOB ? -1 : 1);
+  }
+  if (type == SQLITE_TEXT || type == SQLITE_BLOB) {
+    return vec0_metadata_operator_holds(op, -1);
+  }
+  if (kind == VEC0_METADATA_COLUMN_KIND_BOOLEAN) {
+    // a boolean is the integer 0 or 1, and takes only (in)equality operators
+    i64 v;
+    if (vec0_value_as_i64(value, &v) && (v == 0 || v == 1))
+      return -1;
+    return vec0_metadata_operator_holds(op, 1);
+  }
+  return -1;
+}
+
 int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
                               const void *buffer, int size,
                               vec0_metadata_operator op, u8 *b,
@@ -7170,13 +7297,21 @@ int vec0_set_metadata_filter_bitmap(vec0_vtab *p, int metadata_idx,
   // TODO: shouldn't this skip in-valid entries from the chunk's  validity
   // bitmap?
 
+  vec0_metadata_column_kind kind = p->metadata_columns[metadata_idx].kind;
+  int constant = vec0_metadata_constant_result(kind, op, value);
+  if (constant >= 0) {
+    for (int i = 0; i < size; i++) {
+      bitmap_set(b, i, constant);
+    }
+    return SQLITE_OK;
+  }
+
   int rc;
   rc = sqlite3_blob_reopen(blob, chunk_rowid);
   if (rc != SQLITE_OK) {
     return rc;
   }
 
-  vec0_metadata_column_kind kind = p->metadata_columns[metadata_idx].kind;
   int szMatch = 0;
   int blobSize = sqlite3_blob_bytes(blob);
   switch (kind) {
@@ -7263,6 +7398,16 @@ int vec0_set_metadata_filter_bitmap(vec0_vtab *p, int metadata_idx,
   }
   case VEC0_METADATA_COLUMN_KIND_INTEGER: {
     i64 *array = (i64 *)buffer;
+    if (op != VEC0_METADATA_OPERATOR_IN &&
+        sqlite3_value_type(value) == SQLITE_FLOAT) {
+      double target = sqlite3_value_double(value);
+      for (int i = 0; i < size; i++) {
+        bitmap_set(b, i,
+                   vec0_metadata_operator_holds(
+                       op, vec0_compare_i64_double(array[i], target)));
+      }
+      break;
+    }
     i64 target = sqlite3_value_int64(value);
     switch (op) {
     case VEC0_METADATA_OPERATOR_EQ: {
@@ -7371,6 +7516,15 @@ int vec0_set_metadata_filter_bitmap(vec0_vtab *p, int metadata_idx,
   }
   case VEC0_METADATA_COLUMN_KIND_FLOAT: {
     double *array = (double *)buffer;
+    if (sqlite3_value_type(value) == SQLITE_INTEGER) {
+      i64 target = sqlite3_value_int64(value);
+      for (int i = 0; i < size; i++) {
+        bitmap_set(b, i,
+                   vec0_metadata_operator_holds(
+                       op, -vec0_compare_i64_double(target, array[i])));
+      }
+      break;
+    }
     double target = sqlite3_value_double(value);
     switch (op) {
     case VEC0_METADATA_OPERATOR_EQ: {
@@ -7779,17 +7933,31 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
       for (int i = 0; i < argc; i++) {
         int idx = 1 + (i * 4);
         char kind = idxStr[idx + 0];
+        if (kind != VEC0_IDXSTR_KIND_KNN_DISTANCE_CONSTRAINT) {
+          continue;
+        }
+        vec0_distance_constraint_operator op = idxStr[idx + 1];
+
+        int type = sqlite3_value_type(argv[i]);
+        if (type != SQLITE_INTEGER && type != SQLITE_FLOAT) {
+          // No distance compares with NULL, and every distance is less than
+          // any TEXT or BLOB.
+          int keep =
+              type != SQLITE_NULL && (op == VEC0_DISTANCE_CONSTRAINT_LT ||
+                                      op == VEC0_DISTANCE_CONSTRAINT_LE);
+          if (!keep) {
+            for (int j = 0; j < p->chunk_size; j++) {
+              bitmap_set(b, j, 0);
+            }
+          }
+          continue;
+        }
         // Note: SQLite provides distance constraint values as f64 (double), but
         // we cast to f32 (float) for comparison. This matches the precision of
         // our internal distance calculations (which use f32) and avoids
         // precision mismatches. May result in minor precision loss for very
         // small differences.
         f32 target = (f32)sqlite3_value_double(argv[i]);
-
-        if (kind != VEC0_IDXSTR_KIND_KNN_DISTANCE_CONSTRAINT) {
-          continue;
-        }
-        vec0_distance_constraint_operator op = idxStr[idx + 1];
 
         switch (op) {
         case VEC0_DISTANCE_CONSTRAINT_GE: {
@@ -8197,8 +8365,8 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
         if (rc != SQLITE_OK) {
           goto cleanup;
         }
-      } else {
-        rowid = sqlite3_value_int64(item);
+      } else if (!vec0_value_as_rowid(item, &rowid)) {
+        continue;
       }
       rc = array_append(arrayRowidsIn, &rowid);
       if (rc != SQLITE_OK) {
@@ -8249,7 +8417,10 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
       for (rc = sqlite3_vtab_in_first(argv[i], &entry);
            rc == SQLITE_OK && entry;
            rc = sqlite3_vtab_in_next(argv[i], &entry)) {
-        i64 v = sqlite3_value_int64(entry);
+        i64 v;
+        if (!vec0_value_as_i64(entry, &v)) {
+          continue;
+        }
         rc = array_append(&item.array, &v);
         if (rc != SQLITE_OK) {
           array_cleanup(&item.array);
@@ -8276,6 +8447,9 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
       for (rc = sqlite3_vtab_in_first(argv[i], &entry);
            rc == SQLITE_OK && entry;
            rc = sqlite3_vtab_in_next(argv[i], &entry)) {
+        if (sqlite3_value_type(entry) != SQLITE_TEXT) {
+          continue;
+        }
         const char *s = (const char *)sqlite3_value_text(entry);
         int n = sqlite3_value_bytes(entry);
 
@@ -8454,7 +8628,7 @@ int vec0Filter_point(vec0_cursor *pCur, vec0_vtab *p, int argc,
                      sqlite3_value **argv) {
   int rc;
   assert(argc == 1);
-  i64 rowid;
+  i64 rowid = 0;
   struct vec0_query_point_data *point_data = NULL;
 
   point_data = sqlite3_malloc(sizeof(*point_data));
@@ -8472,8 +8646,8 @@ int vec0Filter_point(vec0_cursor *pCur, vec0_vtab *p, int argc,
     if (rc != SQLITE_OK) {
       goto error;
     }
-  } else {
-    rowid = sqlite3_value_int64(argv[0]);
+  } else if (!vec0_value_as_rowid(argv[0], &rowid)) {
+    goto eof;
   }
 
   for (int i = 0; i < p->numVectorColumns; i++) {

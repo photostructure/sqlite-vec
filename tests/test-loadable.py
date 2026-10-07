@@ -1658,6 +1658,77 @@ def test_vec0_point():
     assert execute_all(db, "select * from t2 where id = 'xxx'") == []
 
 
+def test_vec0_rowid_constraint_values():
+    # vec0 looks up a rowid the way SQLite looks up the integer primary key of
+    # `plain`: the value takes numeric affinity first, so a NULL, text that is
+    # not a number, a blob, or a real with a fraction or beyond i64 equals no
+    # rowid. SQLite also declines to read -2**63 as a real as that rowid.
+    db = connect(EXT_PATH)
+    db.execute("create virtual table v using vec0(a float[1], chunk_size=8)")
+    db.execute("create table plain(id integer primary key)")
+    for rowid in [-(2**63), 0, 1, 5, 6]:
+        db.execute("insert into v(rowid, a) values (?, ?)", [rowid, f"[{rowid}]"])
+        db.execute("insert into plain values (?)", [rowid])
+
+    def rowids(sql, value):
+        return sorted(row[0] for row in db.execute(sql, [value]))
+
+    mismatches = []
+    for value in [
+        None,
+        5,
+        5.0,
+        5.5,
+        "5",
+        " 5 ",
+        "5e0",
+        "abc",
+        "",
+        b"\x05",
+        2**63 - 1,
+        1e19,
+        -(2**63),
+        -(2.0**63),
+        "-9.223372036854776e18",
+    ]:
+        knn = "select rowid from v where a match '[0]' and k = 10 and rowid in (?, 6)"
+        point = "select rowid from v where rowid = ?"
+        want_in = rowids("select id from plain where id in (?, 6)", value)
+        want_eq = rowids("select id from plain where id = ?", value)
+        if rowids(knn, value) != want_in:
+            mismatches.append(("knn rowid in", value, rowids(knn, value), want_in))
+        if rowids(point, value) != want_eq:
+            mismatches.append(("rowid =", value, rowids(point, value), want_eq))
+    assert mismatches == []
+
+    # an id that names no row matches nothing, and the others still match
+    db.execute(
+        "create virtual table t using vec0(id text primary key, a float[1], chunk_size=8)"
+    )
+    db.execute("insert into t(id, a) values ('a', '[1]'), ('b', '[2]')")
+    assert sorted(
+        row[0]
+        for row in db.execute(
+            "select id from t where a match '[0]' and k = 10 and id in ('a', 'missing', null)"
+        )
+    ) == ["a"]
+
+
+def test_vec0_rowid_update_delete_values():
+    # UPDATE and DELETE find their row with the same rowid lookup, so a value
+    # that equals no rowid changes no row
+    db = connect(EXT_PATH)
+    db.execute("create virtual table v using vec0(a float[1], chunk_size=8)")
+    db.execute("insert into v(rowid, a) values (0, '[1]'), (5, '[2]')")
+    for value in [None, "abc", b"\x00", 5.5]:
+        db.execute("update v set a = '[9]' where rowid = ?", [value])
+        db.execute("delete from v where rowid = ?", [value])
+    assert [
+        (row[0], row[1])
+        for row in db.execute("select rowid, vec_to_json(a) from v order by rowid")
+    ] == [(0, "[1.000000]"), (5, "[2.000000]")]
+
+
 def test_vec0_text_pk():
     db = connect(EXT_PATH)
     db.execute("""

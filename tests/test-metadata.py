@@ -1200,6 +1200,110 @@ def test_errors(db, snapshot):
     assert exec(db, "select * from v") == snapshot()
 
 
+def test_knn_filters_compare_as_sqlite(db):
+    # vec0 declares its columns without a type, so SQLite compares a
+    # constraint's value with them as is, the way it compares with the untyped
+    # columns of `plain`: NULL compares with nothing, a number never equals
+    # text, and an integer compares with a real exactly. A KNN query's filters
+    # must keep the rows SQLite keeps.
+    db.execute(
+        "create virtual table v using vec0(vector float[1], b boolean, n integer, f float, t text, chunk_size=8)"
+    )
+    db.execute("create table plain(id integer primary key, b, n, f, t)")
+    rows = [
+        (1, 0, 0, 0.0, ""),
+        (2, 1, 5, 5.0, "5"),
+        (3, 1, 6, 6.5, "abc"),
+        (4, 0, -3, -3.25, "x"),
+        (5, 1, 2**53 + 1, 2.0**53, "5.5"),
+    ]
+    for row in rows:
+        db.execute(
+            "insert into v(rowid, vector, b, n, f, t) values (?, '[1]', ?, ?, ?, ?)",
+            row,
+        )
+        db.execute("insert into plain values (?, ?, ?, ?, ?)", row)
+
+    def knn(where, parameters=[]):
+        return sorted(
+            row[0]
+            for row in db.execute(
+                f"select rowid from v where vector match '[1]' and k = 10 and {where}",
+                parameters,
+            )
+        )
+
+    def sql(where, parameters=[]):
+        return sorted(
+            row[0]
+            for row in db.execute(f"select id from plain where {where}", parameters)
+        )
+
+    # 2.0**53 equals 2**53 + 1 when both are doubles, but not exactly
+    values = [
+        None,
+        0,
+        1,
+        1.0,
+        5,
+        5.0,
+        5.5,
+        -3,
+        2**53 + 1,
+        2.0**53,
+        "5",
+        "abc",
+        "",
+        b"\x05",
+    ]
+    comparisons = ["=", "!=", "<", "<=", ">", ">=", "is", "is not"]
+    operators = {
+        "b": ["=", "!=", "is", "is not"],
+        "n": comparisons,
+        "f": comparisons,
+        "t": comparisons + ["like", "glob"],
+    }
+    mismatches = []
+    for column, ops in operators.items():
+        for op in ops:
+            for value in values:
+                where = f"{column} {op} ?"
+                if knn(where, [value]) != sql(where, [value]):
+                    mismatches.append(
+                        (where, value, knn(where, [value]), sql(where, [value]))
+                    )
+    for where in [
+        "n in (null, 5)",
+        "n in ('5', 6)",
+        "n in (5.0, 'abc', x'05', 5.5, -3)",
+        "t in (null, 'abc')",
+        "t in (5, 'x')",
+        "t in (x'78', '')",
+    ]:
+        if knn(where) != sql(where):
+            mismatches.append((where, None, knn(where), sql(where)))
+    assert mismatches == []
+
+
+def test_knn_text_filter_null_long_value(db):
+    # A text value longer than the 12-byte prefix kept in the chunk is compared
+    # in full, which once read through the NULL pointer of a NULL constraint
+    # value and crashed. In SQLite, `select 'x' < null` is NULL, so no row
+    # matches.
+    db.execute(
+        "create virtual table v using vec0(vector float[1], t text, chunk_size=8)"
+    )
+    db.execute("insert into v(rowid, vector, t) values (1, '[1]', ?)", ["x" * 20])
+    for op in ["<", "<=", ">", ">="]:
+        assert (
+            db.execute(
+                f"select rowid from v where vector match '[1]' and k = 10 and t {op} ?",
+                [None],
+            ).fetchall()
+            == []
+        )
+
+
 def authorizer_deny_on(operation, x1, x2=None):
     def _auth(op, p1, p2, p3, p4):
         if op == operation and p1 == x1 and p2 == x2:
