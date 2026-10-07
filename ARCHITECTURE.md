@@ -46,6 +46,77 @@ Very much a WIP.
 - `rowid INTEGER`
 - `data TEXT`
 
+#### Identifying shadow tables
+
+The supported way to tell which tables belong to a `vec0` table is by name. A
+`vec0` table `xyz` owns these tables and no others (`NN` is two digits):
+
+- `xyz_info`, `xyz_chunks`, `xyz_rowids`: always
+- `xyz_vector_chunksNN`: one per vector column
+- `xyz_auxiliary`: only if there are auxiliary columns
+- `xyz_metadatachunksNN`: one per metadata column
+- `xyz_metadatatextNN`: one per text metadata column
+
+This query lists them for every `vec0` table in a database. It reads only
+`sqlite_master`, so it works on every SQLite version and on a connection that
+has not loaded `sqlite-vec`:
+
+```sql
+select v.name as vec0_table, s.name as backing_table
+from sqlite_master as v
+join sqlite_master as s
+  on s.type = 'table'
+ and substr(s.name, 1, length(v.name) + 1) = v.name || '_'
+ and (substr(s.name, length(v.name) + 2) in ('rowids', 'chunks', 'info', 'auxiliary')
+   or substr(s.name, length(v.name) + 2) glob 'vector_chunks[0-9][0-9]'
+   or substr(s.name, length(v.name) + 2) glob 'metadatachunks[0-9][0-9]'
+   or substr(s.name, length(v.name) + 2) glob 'metadatatext[0-9][0-9]')
+where v.type = 'table' and v.rootpage = 0
+  and v.sql like 'create virtual table%using vec0%'
+order by 1, 2;
+```
+
+`type = 'shadow'` in `PRAGMA table_list` is best-effort and should not be
+relied on:
+
+- A connection that has not loaded `sqlite-vec` reports every backing table as
+  `table`.
+- Up to SQLite 3.53, so does a connection that parsed the schema before loading
+  the extension.
+- Before SQLite 3.37 there is no `PRAGMA table_list` and no prefix marking (see
+  below), so the vector chunk tables are never shadow tables.
+- SQLite finds the virtual table that owns a newly created or newly parsed
+  table by splitting its name at the **last** underscore
+  ([documented](https://www.sqlite.org/vtab.html#the_xshadowname_method)). For
+  `xyz_vector_chunks00` it looks for a virtual table called `xyz_vector`, so
+  `xShadowName` is never asked about it on that path.
+- `xShadowName` does report `vector_chunksNN`, and SQLite also marks shadow
+  tables by name prefix when it parses the virtual table's own schema entry.
+  That only sees tables parsed earlier, which in practice means after a
+  `VACUUM` (it rewrites `sqlite_master` with virtual tables last). A `vec0`
+  table created after that `VACUUM` is not covered until the next one.
+- SQLite 3.54 additionally marks by prefix after every `xConnect`. There the
+  vector chunk tables become `shadow` once the `vec0` table has been used in
+  the connection, except in the connection that created it. `PRAGMA
+  table_list` connects every virtual table first, so it always reports them as
+  `shadow`, but under `SQLITE_DBCONFIG_DEFENSIVE` a direct write to a chunk
+  table is still accepted until the `vec0` table is first touched. This prefix
+  matching is not part of the documented contract.
+
+Rules that follow from this:
+
+- A new backing table that has no upstream counterpart should use a suffix
+  without underscores (`metadatachunksNN`, not `metadata_chunksNN`), so that it
+  follows the documented rule. A table ported from upstream keeps upstream's
+  name, to stay file-compatible, and is added to `vec0ShadowName`.
+- `xyz_vector_chunksNN` is not renamed, because that would make databases
+  unreadable by upstream `sqlite-vec` and by earlier releases of this fork.
+- Do not rename a backing table from inside `xConnect`. In
+  [vlasky/sqlite-vec](https://github.com/vlasky/sqlite-vec/commit/44bded9)'s
+  test of a minimal module under AddressSanitizer on SQLite 3.45.3, an
+  `ALTER TABLE ... RENAME` issued there was a heap-use-after-free in the
+  statement that triggered the connect.
+
 ### idxStr
 
 The `vec0` idxStr is a string composed of single "header" character and 0 or

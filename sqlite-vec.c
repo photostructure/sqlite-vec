@@ -10786,7 +10786,15 @@ static int vec0ShadowName(const char *zName) {
     if (sqlite3_stricmp(zName, azName[i]) == 0)
       return 1;
   }
-  // for(size_t i = 0; i < )"vector_chunks", "metadatachunks"
+
+  // "vector_chunksNN", one per vector column
+  static const char zVectorChunks[] = "vector_chunks";
+  size_t n = sizeof(zVectorChunks) - 1;
+  if (sqlite3_strnicmp(zName, zVectorChunks, n) == 0 && zName[n] >= '0' &&
+      zName[n] <= '9' && zName[n + 1] >= '0' && zName[n + 1] <= '9' &&
+      zName[n + 2] == '\0') {
+    return 1;
+  }
   return 0;
 }
 
