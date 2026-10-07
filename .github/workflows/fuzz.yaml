@@ -1,0 +1,62 @@
+name: "Fuzz"
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Fuzz duration per target (seconds)"
+        default: "60"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+      - name: Install clang 18 with libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libclang-rt-18-dev
+      - run: ./scripts/vendor.sh
+      - name: Build fuzz targets
+        run: make -C tests/fuzz all FUZZ_CC=clang-18 FUZZ_LDFLAGS=
+      - name: Run fuzz targets
+        env:
+          DURATION: ${{ inputs.duration || '60' }}
+        run: |
+          EXIT_CODE=0
+          for target in tests/fuzz/targets/*; do
+            [ -f "$target" ] && [ -x "$target" ] || continue
+            name=$(basename "$target")
+            echo "::group::Fuzzing $name ($DURATION seconds)"
+            corpus="tests/fuzz/corpus/${name//_/-}"
+            mkdir -p "$corpus"
+            dict="tests/fuzz/${name//_/-}.dict"
+            dict_args=()
+            [ -f "$dict" ] && dict_args=("-dict=$dict")
+            if ! ASAN_OPTIONS=detect_leaks=1 "$target" "${dict_args[@]}" \
+              -max_total_time="$DURATION" "$corpus" 2>&1; then
+              echo "::error::Fuzz target $name found a crash!"
+              EXIT_CODE=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $EXIT_CODE
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: fuzz-crashes-linux
+          path: |
+            crash-*
+            leak-*
+            timeout-*

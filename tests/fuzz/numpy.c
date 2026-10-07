@@ -24,7 +24,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   rc = sqlite3_vec_numpy_init(db, NULL, NULL);
   assert(rc == SQLITE_OK);
 
-
   rc = sqlite3_prepare_v2(db, "select * from vec_npy_each(?)", -1, &stmt, NULL);
   assert(rc == SQLITE_OK);
   sqlite3_bind_blob(stmt, 1, data, size, SQLITE_STATIC);
