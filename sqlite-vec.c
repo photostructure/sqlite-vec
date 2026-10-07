@@ -1966,15 +1966,6 @@ static void vec_normalize(sqlite3_context *context, int argc,
     return;
   }
 
-  int outSize = dimensions * sizeof(f32);
-  f32 *out = sqlite3_malloc(outSize);
-  if (!out) {
-    cleanup(vector);
-    sqlite3_result_error_code(context, SQLITE_NOMEM);
-    return;
-  }
-  memset(out, 0, outSize);
-
   f32 *v = (f32 *)vector;
 
   // Accumulate in double so that squaring small or large f32 elements does
@@ -1984,6 +1975,22 @@ static void vec_normalize(sqlite3_context *context, int argc,
     norm += (double)v[i] * (double)v[i];
   }
   norm = sqrt(norm);
+  if (norm == 0) {
+    // a zero vector has no direction; return NULL, not a vector of NaNs
+    cleanup(vector);
+    sqlite3_result_null(context);
+    return;
+  }
+
+  int outSize = dimensions * sizeof(f32);
+  f32 *out = sqlite3_malloc(outSize);
+  if (!out) {
+    cleanup(vector);
+    sqlite3_result_error_code(context, SQLITE_NOMEM);
+    return;
+  }
+  memset(out, 0, outSize);
+
   for (size_t i = 0; i < dimensions; i++) {
     out[i] = v[i] / norm;
   }

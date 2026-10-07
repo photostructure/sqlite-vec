@@ -771,6 +771,11 @@ def test_vec_normalize():
         -0.6324555277824402,
     ]
 
+    # a zero vector has no direction, so NULL is returned instead of a vector
+    # of NaNs
+    assert vec_normalize(_f32([0, 0, 0, 0])) is None
+    assert db.execute("select vec_normalize('[0,0,0]')").fetchone()[0] is None
+
     # small and large nonzero vectors are normalized rather than treated as
     # zero-magnitude or returned as a zero vector, the squared magnitude used
     # to underflow/overflow f32
