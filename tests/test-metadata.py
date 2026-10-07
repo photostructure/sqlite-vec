@@ -191,6 +191,20 @@ def test_types(db, snapshot):
     )
 
 
+def test_rejected_insert_leaves_no_row(db):
+    # vec0 writes its shadow tables through separate statements that a failed
+    # INSERT does not roll back, so value types are checked before any write
+    db.execute(
+        "create virtual table v using vec0(vector float[1], t text, +a integer, chunk_size=8)"
+    )
+    db.execute("insert into v(rowid, vector, t, a) values (1, '[1]', 'one', 1)")
+    for values in [(2, "[2]", 2, 2), (2, "[2]", "two", "not int")]:
+        with pytest.raises(sqlite3.DatabaseError):
+            db.execute("insert into v(rowid, vector, t, a) values (?, ?, ?, ?)", values)
+    assert [r[0] for r in db.execute("select rowid from v")] == [1]
+    assert [r[0] for r in db.execute("select rowid from v_rowids")] == [1]
+
+
 def test_updates(db, snapshot):
     db.execute(
         "create virtual table v using vec0(vector float[1], b boolean, n int, f float, t text, chunk_size=8)"

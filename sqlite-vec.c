@@ -9162,63 +9162,68 @@ static int vec0_exec_metadata_text_sql(sqlite3 *db, char *zSql, i64 rowid,
   return (rc == SQLITE_DONE) ? SQLITE_OK : SQLITE_ERROR;
 }
 
-int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid,
-                              i64 chunk_id, i64 chunk_offset, sqlite3_value *v,
-                              int isupdate) {
-  int rc;
-  sqlite3_blob *blobValue = NULL;
+// Checks that v has the type of the given metadata column, setting a vtab
+// error if not.
+static int vec0_validate_metadata_value(vec0_vtab *p, int metadata_column_idx,
+                                        sqlite3_value *v) {
   struct Vec0MetadataColumnDefinition *metadata_column =
       &p->metadata_columns[metadata_column_idx];
-  vec0_metadata_column_kind kind = metadata_column->kind;
-
-  // verify input value matches column type
-  switch (kind) {
+  switch (metadata_column->kind) {
   case VEC0_METADATA_COLUMN_KIND_BOOLEAN: {
     if (sqlite3_value_type(v) != SQLITE_INTEGER ||
         ((sqlite3_value_int(v) != 0) && (sqlite3_value_int(v) != 1))) {
-      rc = SQLITE_ERROR;
       vtab_set_error(&p->base,
                      "Expected 0 or 1 for BOOLEAN metadata column %.*s",
                      metadata_column->name_length, metadata_column->name);
-      goto done;
+      return SQLITE_ERROR;
     }
     break;
   }
   case VEC0_METADATA_COLUMN_KIND_INTEGER: {
     if (sqlite3_value_type(v) != SQLITE_INTEGER) {
-      rc = SQLITE_ERROR;
       vtab_set_error(
           &p->base,
           "Expected integer for INTEGER metadata column %.*s, received %s",
           metadata_column->name_length, metadata_column->name,
           type_name(sqlite3_value_type(v)));
-      goto done;
+      return SQLITE_ERROR;
     }
     break;
   }
   case VEC0_METADATA_COLUMN_KIND_FLOAT: {
     if (sqlite3_value_type(v) != SQLITE_FLOAT) {
-      rc = SQLITE_ERROR;
       vtab_set_error(
           &p->base,
           "Expected float for FLOAT metadata column %.*s, received %s",
           metadata_column->name_length, metadata_column->name,
           type_name(sqlite3_value_type(v)));
-      goto done;
+      return SQLITE_ERROR;
     }
     break;
   }
   case VEC0_METADATA_COLUMN_KIND_TEXT: {
     if (sqlite3_value_type(v) != SQLITE_TEXT) {
-      rc = SQLITE_ERROR;
       vtab_set_error(&p->base,
                      "Expected text for TEXT metadata column %.*s, received %s",
                      metadata_column->name_length, metadata_column->name,
                      type_name(sqlite3_value_type(v)));
-      goto done;
+      return SQLITE_ERROR;
     }
     break;
   }
+  }
+  return SQLITE_OK;
+}
+
+int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid,
+                              i64 chunk_id, i64 chunk_offset, sqlite3_value *v,
+                              int isupdate) {
+  sqlite3_blob *blobValue = NULL;
+  vec0_metadata_column_kind kind =
+      p->metadata_columns[metadata_column_idx].kind;
+  int rc = vec0_validate_metadata_value(p, metadata_column_idx, v);
+  if (rc != SQLITE_OK) {
+    return rc;
   }
 
   rc = sqlite3_blob_open(p->db, p->schemaName,
@@ -9481,6 +9486,34 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     goto cleanup;
   }
 
+  // Check auxiliary and metadata value types before the first write: the
+  // shadow-table writes below are not rolled back if the INSERT fails.
+  for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
+    sqlite3_value *v = argv[2 + VEC0_COLUMN_USERN_START + i];
+    if (p->user_column_kinds[i] == SQLITE_VEC0_USER_COLUMN_KIND_AUXILIARY) {
+      int auxiliary_key_idx = p->user_column_idxs[i];
+      int v_type = sqlite3_value_type(v);
+      if (v_type != SQLITE_NULL &&
+          (v_type != p->auxiliary_columns[auxiliary_key_idx].type)) {
+        rc = SQLITE_CONSTRAINT;
+        vtab_set_error(pVTab,
+                       "Auxiliary column type mismatch: The auxiliary column "
+                       "%.*s has type %s, but %s was provided.",
+                       p->auxiliary_columns[auxiliary_key_idx].name_length,
+                       p->auxiliary_columns[auxiliary_key_idx].name,
+                       type_name(p->auxiliary_columns[auxiliary_key_idx].type),
+                       type_name(v_type));
+        goto cleanup;
+      }
+    } else if (p->user_column_kinds[i] ==
+               SQLITE_VEC0_USER_COLUMN_KIND_METADATA) {
+      rc = vec0_validate_metadata_value(p, p->user_column_idxs[i], v);
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+    }
+  }
+
   // Step #1: Insert/get a rowid for this row, from the _rowids table.
   rc = vec0Update_InsertRowidStep(p, argv[2 + VEC0_COLUMN_ID], &rowid);
   if (rc != SQLITE_OK) {
@@ -9536,20 +9569,6 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       }
       int auxiliary_key_idx = p->user_column_idxs[i];
       sqlite3_value *v = argv[2 + VEC0_COLUMN_USERN_START + i];
-      int v_type = sqlite3_value_type(v);
-      if (v_type != SQLITE_NULL &&
-          (v_type != p->auxiliary_columns[auxiliary_key_idx].type)) {
-        sqlite3_finalize(stmt);
-        rc = SQLITE_CONSTRAINT;
-        vtab_set_error(pVTab,
-                       "Auxiliary column type mismatch: The auxiliary column "
-                       "%.*s has type %s, but %s was provided.",
-                       p->auxiliary_columns[auxiliary_key_idx].name_length,
-                       p->auxiliary_columns[auxiliary_key_idx].name,
-                       type_name(p->auxiliary_columns[auxiliary_key_idx].type),
-                       type_name(v_type));
-        goto cleanup;
-      }
       // first 1 is for 1-based indexing on sqlite3_bind_*, second 1 is to
       // account for initial rowid parameter
       sqlite3_bind_value(stmt, 1 + 1 + auxiliary_key_idx, v);
