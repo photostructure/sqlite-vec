@@ -5434,6 +5434,12 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
   return SQLITE_OK;
 
 error:
+  // Column names are copied into pNew while parsing, before the pNew->num*
+  // counters are assigned; set them so vec0_free() frees those names.
+  pNew->numVectorColumns = numVectorColumns;
+  pNew->numPartitionColumns = numPartitionColumns;
+  pNew->numAuxiliaryColumns = numAuxiliaryColumns;
+  pNew->numMetadataColumns = numMetadataColumns;
   vec0_free(pNew);
   return SQLITE_ERROR;
 }
@@ -6484,6 +6490,7 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
   rc = sqlite3_blob_read(rowidsBlob, rowids, sqlite3_blob_bytes(rowidsBlob), 0);
   if (rc != SQLITE_OK) {
     sqlite3_blob_close(rowidsBlob);
+    sqlite3_free(rowids);
     return rc;
   }
   sqlite3_blob_close(rowidsBlob);
@@ -8179,6 +8186,9 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
   if (rc != SQLITE_OK) {
     goto cleanup;
   }
+  // knn_data owns the top-k buffers from here, so the error path frees them.
+  knn_data->rowids = topk_rowids;
+  knn_data->distances = topk_distances;
 
   // MMR reranking: select diverse subset from over-fetched candidates
   if (mmr_lambda >= 0.0f && mmr_lambda < 1.0f && k_used > k_original) {
@@ -8194,8 +8204,6 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
 
   knn_data->current_idx = 0;
   knn_data->k = k;
-  knn_data->rowids = topk_rowids;
-  knn_data->distances = topk_distances;
   knn_data->k_used = k_used;
 
   pCur->knn_data = knn_data;
@@ -9134,6 +9142,7 @@ int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid,
                               i64 chunk_id, i64 chunk_offset, sqlite3_value *v,
                               int isupdate) {
   int rc;
+  sqlite3_blob *blobValue = NULL;
   struct Vec0MetadataColumnDefinition *metadata_column =
       &p->metadata_columns[metadata_column_idx];
   vec0_metadata_column_kind kind = metadata_column->kind;
@@ -9188,7 +9197,6 @@ int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid,
   }
   }
 
-  sqlite3_blob *blobValue = NULL;
   rc = sqlite3_blob_open(p->db, p->schemaName,
                          p->shadowMetadataChunksNames[metadata_column_idx],
                          "data", chunk_id, 1, &blobValue);
@@ -9247,6 +9255,9 @@ int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid,
     rc = sqlite3_blob_write(
         blobValue, &view, VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH,
         chunk_offset * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH);
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
     if (n > VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
       char *zSql;
       if (isupdate && (prev_n > VEC0_METADATA_TEXT_VIEW_DATA_LENGTH)) {
@@ -9285,14 +9296,13 @@ int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid,
   }
   }
 
-  if (rc != SQLITE_OK) {
-  }
-  rc = sqlite3_blob_close(blobValue);
-  if (rc != SQLITE_OK) {
-    goto done;
-  }
-
 done:
+  if (blobValue) {
+    int closeRc = sqlite3_blob_close(blobValue);
+    if (rc == SQLITE_OK) {
+      rc = closeRc;
+    }
+  }
   return rc;
 }
 
@@ -9946,6 +9956,7 @@ int vec0Update_UpdateAuxColumn(vec0_vtab *p, int auxiliary_column_idx,
     return SQLITE_NOMEM;
   }
   rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free((void *)zSql);
   if (rc != SQLITE_OK) {
     return rc;
   }

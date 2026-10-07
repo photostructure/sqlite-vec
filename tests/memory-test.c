@@ -835,6 +835,66 @@ cleanup:
   return result;
 }
 
+static int test_error_path_leaks(void) {
+  printf("Testing error and update paths for leaks...\n");
+  sqlite3 *db = NULL;
+  int rc;
+  int result = 1;
+
+  rc = sqlite3_open(":memory:", &db);
+  CHECK_OK(rc, "open database");
+
+  // A constructor error after columns were parsed must free their names.
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE bad USING vec0("
+                    "  embedding float[4], +title text, tag text,"
+                    "  not a column definition"
+                    ")",
+                    NULL, NULL, NULL);
+  if (rc == SQLITE_OK) {
+    fprintf(stderr, "FAILED: invalid vec0 definition was accepted\n");
+    goto cleanup;
+  }
+
+  // Updating an auxiliary column builds a SQL string per call.
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE docs USING vec0("
+                    "  embedding float[4], +title text, tag text"
+                    ");"
+                    "INSERT INTO docs(rowid, embedding, title, tag)"
+                    "  VALUES (1, '[1,2,3,4]', 'a', 'short');"
+                    "UPDATE docs SET title = 'b' WHERE rowid = 1;",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "update auxiliary column");
+
+  // A failed long-text metadata write must close the metadata blob handle.
+  rc = sqlite3_exec(db, "DROP TABLE docs_metadatatext00", NULL, NULL, NULL);
+  CHECK_OK(rc, "drop metadata text shadow table");
+  rc = sqlite3_exec(db,
+                    "INSERT INTO docs(rowid, embedding, title, tag)"
+                    "  VALUES (2, '[1,2,3,4]', 'c',"
+                    "          'a text value longer than the inline buffer')",
+                    NULL, NULL, NULL);
+  if (rc == SQLITE_OK) {
+    fprintf(stderr, "FAILED: long-text insert without its shadow table "
+                    "succeeded\n");
+    goto cleanup;
+  }
+
+  // sqlite3_close() refuses with SQLITE_BUSY while a blob handle is open.
+  rc = sqlite3_close(db);
+  db = NULL;
+  CHECK_OK(rc, "close database");
+
+  printf("  PASS: error and update paths\n");
+  result = 0;
+
+cleanup:
+  if (db)
+    sqlite3_close(db);
+  return result;
+}
+
 int main(void) {
   printf("sqlite-vec memory test harness\n");
   printf("==============================\n\n");
@@ -859,6 +919,7 @@ int main(void) {
   failures += test_repeated_knn_queries();
   failures += test_long_text_metadata_updates();
   failures += test_insert_with_multiple_vectors();
+  failures += test_error_path_leaks();
 
   printf("\n==============================\n");
   if (failures == 0) {

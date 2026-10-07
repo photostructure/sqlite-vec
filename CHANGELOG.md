@@ -7,6 +7,11 @@
 - Removed the Python, Ruby, Rust, and Lua bindings, their packaging (`setup.py`, `pyproject.toml`, `MANIFEST.in`, `sqlite-vec.gemspec`, `extconf.rb`, `lib/sqlite_vec.rb`, `Cargo.toml`, `build.rs`, `src/lib.rs`, `bindings/`), and their examples. This fork publishes only the npm package. Installing those bindings from `main` (for example `pip install git+https://github.com/photostructure/sqlite-vec`, or the `gem` and `cargo --git` equivalents) no longer works; release tags up to v2.0.2 still include them. Use upstream [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or [`vlasky/sqlite-vec`](https://github.com/vlasky/sqlite-vec) instead.
 - Removed the `test.yaml` jobs that built iOS, wasm, pyodide, cosmopolitan, and 32-bit ARM artifacts that no release ships, and the Rust unit-test harness under `tests/`, which nothing ran.
 
+### Fixed
+
+- Fixed memory and handle leaks that [vlasky@5ae4fed](https://github.com/vlasky/sqlite-vec/commit/5ae4fed) fixed in its fork and this fork still had: every `UPDATE` of an auxiliary column leaked its SQL string; a `vec0` constructor that failed after parsing some columns leaked their names; a long-text metadata write that failed left its blob handle open, so `sqlite3_close()` returned `SQLITE_BUSY`; a KNN query leaked its top-k buffers when MMR reranking failed; and text-metadata filtering leaked a rowid buffer when its blob read failed.
+- Metadata writes now report a failed blob write instead of returning success.
+
 ### Infrastructure
 
 - `release.yaml` now installs the release-candidate tarball on all eight targets and runs `tests/test-npm-package.mjs` against it before tagging. The test checks that the ESM and CommonJS entry points resolve that target's binary, that `vec_version()` matches the package version, and that a `vec0` KNN query returns the nearest rows. Previously `scripts/package-npm.sh` checked only the tarball's name, version, and file list, and the linux-arm64, linux-x64-musl, linux-arm64-musl, and win32-arm64 binaries shipped without running on those platforms. `publish.yaml` still rebuilds the published binaries from the signed tag; this check runs the release-candidate build of that same commit.
