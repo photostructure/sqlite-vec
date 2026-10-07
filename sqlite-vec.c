@@ -647,6 +647,59 @@ static f32 distance_hamming_u8(u8 *a, u8 *b, size_t n) {
   return (f32)same;
 }
 
+#ifdef SQLITE_VEC_ENABLE_NEON
+static f32 distance_hamming_neon(const u8 *a, const u8 *b, size_t n_bytes) {
+  const u8 *pEnd = a + n_bytes;
+
+  uint32x4_t acc1 = vdupq_n_u32(0);
+  uint32x4_t acc2 = vdupq_n_u32(0);
+  uint32x4_t acc3 = vdupq_n_u32(0);
+  uint32x4_t acc4 = vdupq_n_u32(0);
+
+  while (pEnd - a >= 64) {
+    uint8x16_t v1 = vld1q_u8(a);
+    uint8x16_t v2 = vld1q_u8(b);
+    acc1 = vaddq_u32(acc1, vpaddlq_u16(vpaddlq_u8(vcntq_u8(veorq_u8(v1, v2)))));
+
+    v1 = vld1q_u8(a + 16);
+    v2 = vld1q_u8(b + 16);
+    acc2 = vaddq_u32(acc2, vpaddlq_u16(vpaddlq_u8(vcntq_u8(veorq_u8(v1, v2)))));
+
+    v1 = vld1q_u8(a + 32);
+    v2 = vld1q_u8(b + 32);
+    acc3 = vaddq_u32(acc3, vpaddlq_u16(vpaddlq_u8(vcntq_u8(veorq_u8(v1, v2)))));
+
+    v1 = vld1q_u8(a + 48);
+    v2 = vld1q_u8(b + 48);
+    acc4 = vaddq_u32(acc4, vpaddlq_u16(vpaddlq_u8(vcntq_u8(veorq_u8(v1, v2)))));
+
+    a += 64;
+    b += 64;
+  }
+
+  while (pEnd - a >= 16) {
+    uint8x16_t v1 = vld1q_u8(a);
+    uint8x16_t v2 = vld1q_u8(b);
+    acc1 = vaddq_u32(acc1, vpaddlq_u16(vpaddlq_u8(vcntq_u8(veorq_u8(v1, v2)))));
+    a += 16;
+    b += 16;
+  }
+
+  acc1 = vaddq_u32(acc1, acc2);
+  acc3 = vaddq_u32(acc3, acc4);
+  acc1 = vaddq_u32(acc1, acc3);
+  u32 sum = vaddvq_u32(acc1);
+
+  while (a < pEnd) {
+    sum += hamdist_table[*a ^ *b];
+    a++;
+    b++;
+  }
+
+  return (f32)sum;
+}
+#endif
+
 static f32 distance_hamming_u64(const u8 *a, const u8 *b, size_t n) {
   int same = 0;
   for (unsigned long i = 0; i < n; i++) {
@@ -669,12 +722,19 @@ static f32 distance_hamming_u64(const u8 *a, const u8 *b, size_t n) {
  */
 static f32 distance_hamming(const void *a, const void *b, const void *d) {
   size_t dimensions = *((size_t *)d);
+  size_t n_bytes = dimensions / CHAR_BIT;
+
+#ifdef SQLITE_VEC_ENABLE_NEON
+  if (dimensions >= 128) {
+    return distance_hamming_neon((const u8 *)a, (const u8 *)b, n_bytes);
+  }
+#endif
 
   if ((dimensions % 64) == 0) {
     return distance_hamming_u64((const u8 *)a, (const u8 *)b,
-                                dimensions / 8 / CHAR_BIT);
+                                n_bytes / sizeof(u64));
   }
-  return distance_hamming_u8((u8 *)a, (u8 *)b, dimensions / CHAR_BIT);
+  return distance_hamming_u8((u8 *)a, (u8 *)b, n_bytes);
 }
 
 // from SQLite source:

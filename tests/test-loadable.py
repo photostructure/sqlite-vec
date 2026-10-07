@@ -521,6 +521,17 @@ def test_vec_distance_hamming():
     assert vec_distance_hamming(b"\xff", b"\x01") == 7
     assert vec_distance_hamming(b"\xab", b"\xab") == 0
 
+    # large vectors exercise the NEON path (>= 128 dimensions), including its
+    # 64-byte and 16-byte loops and its scalar tail
+    import random
+
+    rng = random.Random(42)
+    for n_bytes in (16, 24, 32, 128, 200, 512):
+        a = bytes(rng.randrange(256) for _ in range(n_bytes))
+        b = bytes(rng.randrange(256) for _ in range(n_bytes))
+        expected = sum(bin(x ^ y).count("1") for x, y in zip(a, b))
+        assert vec_distance_hamming(a, b) == expected
+
     with pytest.raises(
         sqlite3.OperationalError,
         match="Cannot calculate hamming distance between two float32 vectors.",
