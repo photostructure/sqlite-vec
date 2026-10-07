@@ -1748,6 +1748,21 @@ def test_vec0_text_pk():
                 "distance": 0.2900000214576721,
             },
         ]
+        # an id that is not in the table matches no row; it used to make the
+        # whole query return no rows
+        assert execute_all(
+            db,
+            "select t_id, distance from t where aaa match ? and k = 3 and t_id in ('t_2', 'missing')",
+            ["[.01]"],
+        ) == [{"t_id": "t_2", "distance": 0.1899999976158142}]
+        assert (
+            execute_all(
+                db,
+                "select t_id from t where aaa match ? and k = 3 and t_id in ('missing')",
+                ["[.01]"],
+            )
+            == []
+        )
 
     # test deletes on text primary keys
     db.execute("delete from t where t_id = 't_1'")

@@ -8092,7 +8092,6 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
 #if COMPILER_SUPPORTS_VTAB_IN
   if (rowid_in_idx >= 0) {
     sqlite3_value *item;
-    int rc;
     arrayRowidsIn = sqlite3_malloc(sizeof(*arrayRowidsIn));
     if (!arrayRowidsIn) {
       rc = SQLITE_NOMEM;
@@ -8110,6 +8109,10 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
       i64 rowid;
       if (p->pkIsText) {
         rc = vec0_rowid_from_id(p, item, &rowid);
+        if (rc == SQLITE_EMPTY) {
+          // an id that is not in the table matches no row
+          continue;
+        }
         if (rc != SQLITE_OK) {
           goto cleanup;
         }
