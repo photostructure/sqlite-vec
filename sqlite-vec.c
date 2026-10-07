@@ -4713,9 +4713,15 @@ int vec0_new_chunk(vec0_vtab *p, sqlite3_value **partitionKeyValues,
     i64 vectorsSize = p->chunk_size * vector_column_byte_size(
                                           p->vector_columns[vector_column_idx]);
 
+    // SHADOW_TABLE_ROWID_QUIRK: tables created before v0.2.0-alpha declare
+    // _vector_chunksNN and _metadatachunksNN with "rowid PRIMARY KEY", without
+    // INTEGER, so their "rowid" column is not an alias for SQLite's _rowid_.
+    // sqlite3_blob_open() addresses rows by _rowid_, and once a chunk is
+    // deleted, an auto-assigned _rowid_ can differ from the chunk_id stored in
+    // "rowid", so set both. In newer tables both names are the same column.
     zSql = sqlite3_mprintf("INSERT INTO " VEC0_SHADOW_VECTOR_N_NAME
-                           "(rowid, vectors)"
-                           "VALUES (?, ?)",
+                           "(_rowid_, rowid, vectors)"
+                           "VALUES (?, ?, ?)",
                            p->schemaName, p->tableName, vector_column_idx);
     if (!zSql) {
       return SQLITE_NOMEM;
@@ -4729,7 +4735,8 @@ int vec0_new_chunk(vec0_vtab *p, sqlite3_value **partitionKeyValues,
     }
 
     sqlite3_bind_int64(stmt, 1, rowid);
-    sqlite3_bind_zeroblob64(stmt, 2, vectorsSize);
+    sqlite3_bind_int64(stmt, 2, rowid);
+    sqlite3_bind_zeroblob64(stmt, 3, vectorsSize);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -4744,9 +4751,10 @@ int vec0_new_chunk(vec0_vtab *p, sqlite3_value **partitionKeyValues,
       continue;
     }
     int metadata_column_idx = p->user_column_idxs[i];
+    // see SHADOW_TABLE_ROWID_QUIRK above for why _rowid_ and rowid are both set
     zSql = sqlite3_mprintf("INSERT INTO " VEC0_SHADOW_METADATA_N_NAME
-                           "(rowid, data)"
-                           "VALUES (?, ?)",
+                           "(_rowid_, rowid, data)"
+                           "VALUES (?, ?, ?)",
                            p->schemaName, p->tableName, metadata_column_idx);
     if (!zSql) {
       return SQLITE_NOMEM;
@@ -4760,8 +4768,9 @@ int vec0_new_chunk(vec0_vtab *p, sqlite3_value **partitionKeyValues,
     }
 
     sqlite3_bind_int64(stmt, 1, rowid);
+    sqlite3_bind_int64(stmt, 2, rowid);
     sqlite3_bind_zeroblob64(
-        stmt, 2,
+        stmt, 3,
         vec0_metadata_chunk_size(p->metadata_columns[metadata_column_idx].kind,
                                  p->chunk_size));
 

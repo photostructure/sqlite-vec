@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed inserts into `vec0` tables created before v0.2.0-alpha after `optimize` had removed a chunk. Those tables declare their `_vector_chunksNN` and `_metadatachunksNN` shadow tables with `rowid PRIMARY KEY` instead of `rowid INTEGER PRIMARY KEY`, so a new chunk's SQLite rowid could differ from its chunk id, and the insert failed with `Error opening vector blob`; KNN and point queries on the table then failed too. New chunks now set both ids. Ported from [vlasky@3a64182](https://github.com/vlasky/sqlite-vec/commit/3a64182).
 - An `INSERT` into a `vec0` table with a value of the wrong type for a metadata or auxiliary column now fails before writing anything. It used to fail after writing the row's rowid, vector, and some column values, and a surrounding transaction could commit that partial row, because `vec0` writes its shadow tables through separate statements that a failed `INSERT` does not roll back.
 - Fixed memory and handle leaks that [vlasky@5ae4fed](https://github.com/vlasky/sqlite-vec/commit/5ae4fed) fixed in its fork and this fork still had: every `UPDATE` of an auxiliary column leaked its SQL string; a `vec0` constructor that failed after parsing some columns leaked their names; a long-text metadata write that failed left its blob handle open, so `sqlite3_close()` returned `SQLITE_BUSY`; a KNN query leaked its top-k buffers when MMR reranking failed; and text-metadata filtering leaked a rowid buffer when its blob read failed.
 - Metadata writes now report a failed blob write instead of returning success.
@@ -24,6 +25,7 @@
 
 ### Infrastructure
 
+- Added backwards-compatibility tests against a database created by upstream v0.1.6 (`tests/fixtures/legacy-v0.1.6.db`), ported from [asg017@6e2c4c6](https://github.com/asg017/sqlite-vec/commit/6e2c4c6).
 - `release.yaml` now installs the release-candidate tarball on all eight targets and runs `tests/test-npm-package.mjs` against it before tagging. The test checks that the ESM and CommonJS entry points resolve that target's binary, that `vec_version()` matches the package version, and that a `vec0` KNN query returns the nearest rows. Previously `scripts/package-npm.sh` checked only the tarball's name, version, and file list, and the linux-arm64, linux-x64-musl, linux-arm64-musl, and win32-arm64 binaries shipped without running on those platforms. `publish.yaml` still rebuilds the published binaries from the signed tag; this check runs the release-candidate build of that same commit.
 
 ## [2.0.2] - 2026-10-06
