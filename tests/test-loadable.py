@@ -421,15 +421,7 @@ def test_vec_distance_cosine():
     check([1.2, 0.1], [0.4, -0.4])
     check([-1.2, -0.1], [-0.4, 0.4])
     check([1, 2, 3], [-9, -8, -7], dtype=np.int8)
-    # Use isclose since sqrtf precision differs from sqrt
-    assert isclose(
-        vec_distance_cosine("[1.1, 1.0]", "[1.2, 1.2]"),
-        npy_cosine(
-            np.array([1.1, 1.0], dtype=np.float32),
-            np.array([1.2, 1.2], dtype=np.float32),
-        ),
-        abs_tol=1e-6,
-    )
+    assert vec_distance_cosine("[1.1, 1.0]", "[1.2, 1.2]") == 0.0011318627512082458
 
     vec_distance_cosine_bit = lambda *args: db.execute(
         "select vec_distance_cosine(vec_bit(?), vec_bit(?))", args
@@ -483,6 +475,29 @@ def test_vec_distance_cosine_zero_vector():
     assert vec_distance_cosine_bit(b"\x00", b"\xff") == 1.0
     assert vec_distance_cosine_bit(b"\xff", b"\x00") == 1.0
     assert vec_distance_cosine_bit(b"\x00", b"\x00") == 1.0
+
+
+def test_vec_distance_cosine_extreme_magnitudes():
+    # squaring very small or very large f32 elements used to underflow or
+    # overflow the f32 magnitude accumulators, returning +-Inf, NaN or a wrong
+    # distance for nonzero finite vectors
+    # https://github.com/asg017/sqlite-vec/issues/324
+    vec_distance_cosine = lambda a, b: db.execute(
+        "select vec_distance_cosine(?, ?)", [_f32(a), _f32(b)]
+    ).fetchone()[0]
+
+    for scale in [1e-45, 1e-30, 1e-25, 1e-20, 1.0, 1e20, 3e38]:
+        # cosine distance is invariant under positive scaling
+        assert vec_distance_cosine([1, 0], [scale, 0]) == 0.0
+        assert vec_distance_cosine([scale, 0], [1, 0]) == 0.0
+        assert vec_distance_cosine([scale, 0], [scale, 0]) == 0.0
+        assert vec_distance_cosine([1, 0], [-scale, 0]) == 2.0
+        assert vec_distance_cosine([1, 0], [0, scale]) == 1.0
+        assert isclose(
+            vec_distance_cosine([1, 0], [scale, scale]),
+            1 - 1 / np.sqrt(2),
+            abs_tol=1e-6,
+        )
 
 
 def test_ensure_vector_match_cleanup_on_second_vector_error():
@@ -755,6 +770,18 @@ def test_vec_normalize():
         -0.3162277638912201,
         -0.6324555277824402,
     ]
+
+    # small and large nonzero vectors are normalized rather than treated as
+    # zero-magnitude or returned as a zero vector, the squared magnitude used
+    # to underflow/overflow f32
+    # https://github.com/asg017/sqlite-vec/issues/324
+    for scale in [1e-45, 1e-30, 1e-25, 1e-22, 1e-20, 1e20, 3e38]:
+        assert vec_normalize(_f32([scale, 0])) == _f32([1, 0])
+        assert vec_normalize(_f32([0, -scale])) == _f32([0, -1])
+        assert np.allclose(
+            np.frombuffer(vec_normalize(_f32([scale, scale])), dtype=np.float32),
+            [1 / np.sqrt(2)] * 2,
+        )
 
 
 def test_vec_slice():
@@ -2675,6 +2702,44 @@ def test_vec0_distance_metric():
     for actual, expected in zip(cosine_results, expected_cosine):
         assert actual["rowid"] == expected["rowid"]
         assert isclose(actual["distance"], expected["distance"], abs_tol=1e-6)
+
+
+def test_vec0_cosine_extreme_magnitudes():
+    # tiny or huge nonzero vectors used to get +-Inf, NaN or wrong cosine
+    # distances, which ranked them ahead of (or behind) the true nearest
+    # neighbors
+    # https://github.com/asg017/sqlite-vec/issues/324
+    db = connect(EXT_PATH)
+    db.execute("create virtual table v using vec0(a float[2] distance_metric=cosine)")
+    db.executemany(
+        "insert into v(rowid, a) values (?, ?)",
+        [
+            (1, _f32([0.9, 0.1])),
+            (2, _f32([1e-25, 0])),
+            (3, _f32([1e-25, 1e-25])),
+            (4, _f32([-1e-25, 0])),
+            (5, _f32([1e-30, 0])),
+            (6, _f32([3e38, 3e38])),
+        ],
+    )
+
+    expected = [
+        {"rowid": 2, "distance": 0.0},
+        {"rowid": 5, "distance": 0.0},
+        {"rowid": 1, "distance": 0.006116265896707773},
+        {"rowid": 3, "distance": 0.2928932309150696},
+        {"rowid": 6, "distance": 0.2928932309150696},
+        {"rowid": 4, "distance": 2.0},
+    ]
+    for query in ([1, 0], [1e-25, 0], [3e38, 0]):
+        rows = execute_all(
+            db,
+            "select rowid, distance from v where a match ? and k = 6",
+            [_f32(query)],
+        )
+        # the order of equidistant rows is unspecified
+        assert sorted(rows, key=lambda r: (r["distance"], r["rowid"])) == expected
+        assert [r["distance"] for r in rows] == [r["distance"] for r in expected]
 
 
 def test_vec0_vacuum():

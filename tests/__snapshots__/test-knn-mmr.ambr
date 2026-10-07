@@ -9,19 +9,19 @@
       }),
       OrderedDict({
         'rowid': 2,
-        'distance': 0.005062758922576904,
+        'distance': 0.005062811076641083,
       }),
       OrderedDict({
         'rowid': 3,
-        'distance': 0.011511921882629395,
+        'distance': 0.011511985212564468,
       }),
       OrderedDict({
         'rowid': 4,
-        'distance': 0.02060168981552124,
+        'distance': 0.020601652562618256,
       }),
       OrderedDict({
         'rowid': 5,
-        'distance': 0.03227579593658447,
+        'distance': 0.032275766134262085,
       }),
     ]),
   })
@@ -36,7 +36,7 @@
       }),
       OrderedDict({
         'rowid': 2,
-        'distance': 0.005062758922576904,
+        'distance': 0.005062811076641083,
       }),
       OrderedDict({
         'rowid': 8,
@@ -44,11 +44,11 @@
       }),
       OrderedDict({
         'rowid': 3,
-        'distance': 0.011511921882629395,
+        'distance': 0.011511985212564468,
       }),
       OrderedDict({
         'rowid': 4,
-        'distance': 0.02060168981552124,
+        'distance': 0.020601652562618256,
       }),
     ]),
   })
@@ -63,11 +63,11 @@
       }),
       OrderedDict({
         'rowid': 2,
-        'distance': 0.005062758922576904,
+        'distance': 0.005062811076641083,
       }),
       OrderedDict({
         'rowid': 3,
-        'distance': 0.020195960998535156,
+        'distance': 0.020195940509438515,
       }),
     ]),
   })
@@ -82,11 +82,11 @@
       }),
       OrderedDict({
         'rowid': 2,
-        'distance': 0.005062758922576904,
+        'distance': 0.005062811076641083,
       }),
       OrderedDict({
         'rowid': 3,
-        'distance': 0.020195960998535156,
+        'distance': 0.020195940509438515,
       }),
     ]),
   })
@@ -101,7 +101,7 @@
       }),
       OrderedDict({
         'rowid': 2,
-        'distance': 0.005062758922576904,
+        'distance': 0.005062811076641083,
       }),
       OrderedDict({
         'rowid': 5,
@@ -209,7 +209,7 @@
     'rows': list([
       OrderedDict({
         'rowid': 2,
-        'distance': 0.005062758922576904,
+        'distance': 0.005062811076641083,
       }),
       OrderedDict({
         'rowid': 5,
@@ -217,7 +217,7 @@
       }),
       OrderedDict({
         'rowid': 3,
-        'distance': 0.020195960998535156,
+        'distance': 0.020195940509438515,
       }),
     ]),
   })
@@ -232,7 +232,7 @@
       }),
       OrderedDict({
         'rowid': 2,
-        'distance': 0.005062758922576904,
+        'distance': 0.005062811076641083,
       }),
       OrderedDict({
         'rowid': 5,
