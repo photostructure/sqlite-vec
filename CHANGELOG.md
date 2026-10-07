@@ -29,6 +29,7 @@
 
 ### Infrastructure
 
+- `sqlite-vec.c` initializes the 6-byte numpy magic header from a byte list instead of a 7-byte string literal, which GCC 15 reported with `-Wunterminated-string-initialization` and which is an error in C++. Ported from [vlasky@6342fb4](https://github.com/vlasky/sqlite-vec/commit/6342fb4) ([asg017#321](https://github.com/asg017/sqlite-vec/issues/321)).
 - Added backwards-compatibility tests against a database created by upstream v0.1.6 (`tests/fixtures/legacy-v0.1.6.db`), ported from [asg017@6e2c4c6](https://github.com/asg017/sqlite-vec/commit/6e2c4c6).
 - `release.yaml` now installs the release-candidate tarball on all eight targets and runs `tests/test-npm-package.mjs` against it before tagging. The test checks that the ESM and CommonJS entry points resolve that target's binary, that `vec_version()` matches the package version, and that a `vec0` KNN query returns the nearest rows. Previously `scripts/package-npm.sh` checked only the tarball's name, version, and file list, and the linux-arm64, linux-x64-musl, linux-arm64-musl, and win32-arm64 binaries shipped without running on those platforms. `publish.yaml` still rebuilds the published binaries from the signed tag; this check runs the release-candidate build of that same commit.
 
