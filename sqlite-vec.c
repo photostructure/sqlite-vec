@@ -9335,6 +9335,9 @@ done:
   return rc;
 }
 
+// INSERT OR REPLACE deletes the existing row through vec0Update_Delete.
+int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue);
+
 /**
  * @brief Handles INSERT INTO operations on a vec0 table.
  *
@@ -9508,6 +9511,45 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     } else if (p->user_column_kinds[i] ==
                SQLITE_VEC0_USER_COLUMN_KIND_METADATA) {
       rc = vec0_validate_metadata_value(p, p->user_column_idxs[i], v);
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+    }
+  }
+
+  // Handle INSERT OR REPLACE: if the conflict resolution is REPLACE and the
+  // row already exists, delete the existing row first before inserting.
+  if (sqlite3_vtab_on_conflict(p->db) == SQLITE_REPLACE) {
+    sqlite3_value *idValue = argv[2 + VEC0_COLUMN_ID];
+    int idType = sqlite3_value_type(idValue);
+    int existingRowExists = 0;
+
+    if (p->pkIsText && idType == SQLITE_TEXT) {
+      i64 existingRowid;
+      rc = vec0_rowid_from_id(p, idValue, &existingRowid);
+      if (rc == SQLITE_OK) {
+        existingRowExists = 1;
+      } else if (rc == SQLITE_EMPTY) {
+        rc = SQLITE_OK; // row doesn't exist, proceed with normal insert
+      } else {
+        goto cleanup;
+      }
+    } else if (!p->pkIsText && idType == SQLITE_INTEGER) {
+      i64 existingRowid = sqlite3_value_int64(idValue);
+      i64 chunk_id_tmp, chunk_offset_tmp;
+      rc = vec0_get_chunk_position(p, existingRowid, NULL, &chunk_id_tmp,
+                                   &chunk_offset_tmp);
+      if (rc == SQLITE_OK) {
+        existingRowExists = 1;
+      } else if (rc == SQLITE_EMPTY) {
+        rc = SQLITE_OK; // row doesn't exist, proceed with normal insert
+      } else {
+        goto cleanup;
+      }
+    }
+
+    if (existingRowExists) {
+      rc = vec0Update_Delete(pVTab, idValue);
       if (rc != SQLITE_OK) {
         goto cleanup;
       }

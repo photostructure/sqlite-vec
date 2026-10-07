@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `INSERT OR REPLACE` on a `vec0` table now replaces an existing row with the same rowid or text primary key, including its vectors, metadata, and auxiliary values. Previously it failed with a UNIQUE constraint error. Ported from [asg017@b95c05b](https://github.com/asg017/sqlite-vec/commit/b95c05b) via [vlasky@03b429d](https://github.com/vlasky/sqlite-vec/commit/03b429d) ([asg017#127](https://github.com/asg017/sqlite-vec/issues/127)).
+
 ### Changed
 
 - `float32` vector input now rejects NaN and ±Inf elements with `invalid float32 vector: element N is NaN` (or `Inf`), ported from [asg017@c4c23bd](https://github.com/asg017/sqlite-vec/commit/c4c23bd). A NaN element makes every distance to that vector NaN, which breaks KNN ordering. This applies to blob and JSON input everywhere a `float32` vector is parsed: `vec0` inserts, updates, and KNN query vectors, and SQL functions such as `vec_distance_l2()` and `vec_to_json()`. JSON numbers that overflow `float32`, such as `1e39`, are rejected as Inf. Vectors already stored in a `vec0` table are not checked when a KNN query scans them, but passing one that contains NaN or Inf to a SQL function now fails.
