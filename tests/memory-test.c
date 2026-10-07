@@ -970,8 +970,14 @@ static int test_npy_truncated_headers(void) {
   CHECK_OK(rc, "prepare vec_npy_each");
 
   // Each header ends at the end of its allocation, inside a token the
-  // scanner reads ahead on, so ASan reports any read past the header.
-  const char *headers[] = {"{'descr", "Fals"};
+  // scanner reads ahead on or a shape number the parser converts, so ASan
+  // reports any read past the header.
+  const char *headers[] = {
+      "{'descr",
+      "Fals",
+      "{'shape':(55555",
+      "{'descr':'<f4', 'fortran_order':False, 'shape':(1,55555",
+  };
   for (size_t i = 0; i < sizeof(headers) / sizeof(headers[0]); i++) {
     uint16_t headerLength = (uint16_t)strlen(headers[i]);
     size_t npyLength = 10 + headerLength;

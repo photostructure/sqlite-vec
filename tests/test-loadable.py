@@ -2032,6 +2032,14 @@ def test_vec_npy_each_errors():
             b"\x93NUMPY\x01\x00\x1b\x00{'shape': (2,), }         \n" + _f32([1.0, 2.0])
         )
 
+    # shape numbers saturate instead of wrapping: 2**64 + 1 would wrap to 1 and
+    # match the 4 data bytes
+    header = b"{'descr': '<f4', 'fortran_order': False, 'shape': (18446744073709551617,), }\n"
+    with _raises("numpy array error: Expected a data size of"):
+        vec_npy_each(
+            b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header)) + header + _f32([1.0])
+        )
+
     # with _raises("XXX"):
     #    vec_npy_each(b"\x93NUMPY\x01\x00v\x00{'descr': '<f4', 'fortran_order': False, 'shape': (2, 4), }                                                          \n\xcd\xcc\x8c?\xcd\xcc\x0c@33S@\xcd\xcc\x8c@ff\x1eA\xcd\xcc\x0cAff\xf6@33\xd3@")
 

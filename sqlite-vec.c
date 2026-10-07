@@ -2965,6 +2965,21 @@ int npy_scanner_next(struct NpyScanner *scanner, struct NpyToken *out) {
   return rc;
 }
 
+// Converts a shape number token to a size_t. The header is not NUL-terminated,
+// so strtol() could read past a number that ends at the end of the header.
+// Saturates at SIZE_MAX instead of wrapping.
+static size_t npy_token_to_size(const struct NpyToken *token) {
+  size_t value = 0;
+  for (const unsigned char *p = token->start; p < token->end; p++) {
+    size_t digit = (size_t)(*p - '0');
+    if (value > (SIZE_MAX - digit) / 10) {
+      return SIZE_MAX;
+    }
+    value = value * 10 + digit;
+  }
+  return value;
+}
+
 #define NPY_PARSE_ERROR "Error parsing numpy array: "
 int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
                      size_t headerLength,
@@ -3057,7 +3072,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
                        "Expected an initial number in shape value");
         return SQLITE_ERROR;
       }
-      first = strtol((char *)token.start, NULL, 10);
+      first = npy_token_to_size(&token);
 
       rc = npy_scanner_next(&scanner, &token);
       if ((rc != VEC0_TOKEN_RESULT_SOME) ||
@@ -3075,7 +3090,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
       }
       if (token.token_type == NPY_TOKEN_TYPE_NUMBER) {
         *numElements = first;
-        *numDimensions = strtol((char *)token.start, NULL, 10);
+        *numDimensions = npy_token_to_size(&token);
         rc = npy_scanner_next(&scanner, &token);
         if ((rc != VEC0_TOKEN_RESULT_SOME) ||
             (token.token_type != NPY_TOKEN_TYPE_RPAREN)) {
