@@ -2908,7 +2908,7 @@ int npy_token_next(unsigned char *start, unsigned char *end,
       out->end = ++ptr;
       out->token_type = NPY_TOKEN_TYPE_STRING;
       return VEC0_TOKEN_RESULT_SOME;
-    } else if (curr == 'F' &&
+    } else if (curr == 'F' && (size_t)(end - ptr) >= strlen("False") &&
                strncmp((char *)ptr, "False", strlen("False")) == 0) {
       out->start = ptr;
       out->end = (ptr + (int)strlen("False"));
@@ -2962,6 +2962,9 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
   struct NpyScanner scanner;
   struct NpyToken token;
   int rc;
+  int sawDescr = 0;
+  int sawFortranOrder = 0;
+  int sawShape = 0;
   npy_scanner_init(&scanner, header, headerLength);
 
   if (npy_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_SOME ||
@@ -3010,6 +3013,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
         return SQLITE_ERROR;
       }
       *out_element_type = SQLITE_VEC_ELEMENT_TYPE_FLOAT32;
+      sawDescr = 1;
     } else if (strncmp((char *)key, "'fortran_order'",
                        strlen("'fortran_order'")) == 0) {
       rc = npy_scanner_next(&scanner, &token);
@@ -3021,6 +3025,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
         return SQLITE_ERROR;
       }
       *fortran_order = 0;
+      sawFortranOrder = 1;
     } else if (strncmp((char *)key, "'shape'", strlen("'shape'")) == 0) {
       // "(xxx, xxx)" OR (xxx,)
       size_t first;
@@ -3073,6 +3078,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
         vtab_set_error(pVTab, NPY_PARSE_ERROR "unknown type in shape value");
         return SQLITE_ERROR;
       }
+      sawShape = 1;
     } else {
       vtab_set_error(pVTab, NPY_PARSE_ERROR "unknown key in numpy header");
       return SQLITE_ERROR;
@@ -3084,6 +3090,14 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
       vtab_set_error(pVTab, NPY_PARSE_ERROR "unknown extra token after value");
       return SQLITE_ERROR;
     }
+  }
+
+  // all three keys are mandatory in the npy format; without them the out
+  // parameters would be left uninitialized
+  if (!sawDescr || !sawFortranOrder || !sawShape) {
+    vtab_set_error(pVTab, NPY_PARSE_ERROR
+                   "numpy header missing 'descr', 'fortran_order', or 'shape'");
+    return SQLITE_ERROR;
   }
 
   return SQLITE_OK;

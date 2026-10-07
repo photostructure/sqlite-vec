@@ -936,8 +936,8 @@ cleanup:
   return result;
 }
 
-static int test_npy_unterminated_string(void) {
-  printf("Testing numpy header with an unterminated string...\n");
+static int test_npy_truncated_headers(void) {
+  printf("Testing truncated numpy headers...\n");
   sqlite3 *db = NULL;
   sqlite3_stmt *stmt = NULL;
   unsigned char *npy = NULL;
@@ -946,35 +946,40 @@ static int test_npy_unterminated_string(void) {
 
   rc = sqlite3_open(":memory:", &db);
   CHECK_OK(rc, "open database");
-
-  // The header ends inside a quoted string, at the end of the allocation,
-  // so ASan reports any read past the header.
-  const char header[] = "{'descr";
-  uint16_t headerLength = sizeof(header) - 1;
-  size_t npyLength = 10 + headerLength;
-  npy = malloc(npyLength);
-  if (!npy) {
-    fprintf(stderr, "FAILED: malloc\n");
-    goto cleanup;
-  }
-  memcpy(npy, "\x93NUMPY\x01\x00", 8);
-  memcpy(npy + 8, &headerLength, sizeof(headerLength));
-  memcpy(npy + 10, header, headerLength);
-
   rc = sqlite3_vec_numpy_init(db, NULL, NULL);
   CHECK_OK(rc, "register vec_npy_each");
   rc = sqlite3_prepare_v2(db, "SELECT * FROM vec_npy_each(?)", -1, &stmt,
                           NULL);
   CHECK_OK(rc, "prepare vec_npy_each");
-  sqlite3_bind_blob(stmt, 1, npy, (int)npyLength, SQLITE_STATIC);
-  rc = sqlite3_step(stmt);
-  if (rc != SQLITE_ERROR) {
-    fprintf(stderr, "FAILED: truncated numpy header was accepted (rc=%d)\n",
-            rc);
-    goto cleanup;
+
+  // Each header ends at the end of its allocation, inside a token the
+  // scanner reads ahead on, so ASan reports any read past the header.
+  const char *headers[] = {"{'descr", "Fals"};
+  for (size_t i = 0; i < sizeof(headers) / sizeof(headers[0]); i++) {
+    uint16_t headerLength = (uint16_t)strlen(headers[i]);
+    size_t npyLength = 10 + headerLength;
+    npy = malloc(npyLength);
+    if (!npy) {
+      fprintf(stderr, "FAILED: malloc\n");
+      goto cleanup;
+    }
+    memcpy(npy, "\x93NUMPY\x01\x00", 8);
+    memcpy(npy + 8, &headerLength, sizeof(headerLength));
+    memcpy(npy + 10, headers[i], headerLength);
+
+    sqlite3_bind_blob(stmt, 1, npy, (int)npyLength, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ERROR) {
+      fprintf(stderr, "FAILED: numpy header %s was accepted (rc=%d)\n",
+              headers[i], rc);
+      goto cleanup;
+    }
+    sqlite3_reset(stmt);
+    free(npy);
+    npy = NULL;
   }
 
-  printf("  PASS: numpy header with an unterminated string\n");
+  printf("  PASS: truncated numpy headers\n");
   result = 0;
 
 cleanup:
@@ -1050,7 +1055,7 @@ int main(void) {
   failures += test_insert_with_multiple_vectors();
   failures += test_error_path_leaks();
   failures += test_unaligned_blob_vectors();
-  failures += test_npy_unterminated_string();
+  failures += test_npy_truncated_headers();
   failures += test_parser_edge_inputs();
 
   printf("\n==============================\n");

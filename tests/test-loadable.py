@@ -1975,6 +1975,16 @@ def test_vec_npy_each_errors():
             b"\x93NUMPY\x01\x00v\x00{'descr': '<f4', 'fortran_order': False, 'shape': (2, 4), }                                                          \n\xcd\xcc\x8c?\xcd\xcc\x0c@33S@\xcd\xcc\x8c@ff\x1eA\xcd\xcc\x0cAff\xf6@33\xd3"
         )
 
+    # a header without all three keys used to leave the element count
+    # uninitialized, so the cursor could iterate without bound
+    missing = "Error parsing numpy array: numpy header missing 'descr', 'fortran_order', or 'shape'"
+    with _raises(missing):
+        vec_npy_each(b"\x93NUMPY\x01\x00\x04\x00{ }\n")
+    with _raises(missing):
+        vec_npy_each(
+            b"\x93NUMPY\x01\x00\x1b\x00{'shape': (2,), }         \n" + _f32([1.0, 2.0])
+        )
+
     # with _raises("XXX"):
     #    vec_npy_each(b"\x93NUMPY\x01\x00v\x00{'descr': '<f4', 'fortran_order': False, 'shape': (2, 4), }                                                          \n\xcd\xcc\x8c?\xcd\xcc\x0c@33S@\xcd\xcc\x8c@ff\x1eA\xcd\xcc\x0cAff\xf6@33\xd3@")
 
