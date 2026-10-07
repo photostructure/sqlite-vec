@@ -861,8 +861,17 @@ static int fvec_from_value(sqlite3_value *value, f32 **vector,
       return SQLITE_NOMEM;
     }
     memcpy(buf, blob, bytes);
+    size_t n = bytes / sizeof(f32);
+    for (size_t i = 0; i < n; i++) {
+      if (isnan(buf[i]) || isinf(buf[i])) {
+        *pzErr = sqlite3_mprintf("invalid float32 vector: element %d is %s",
+                                 (int)i, isnan(buf[i]) ? "NaN" : "Inf");
+        sqlite3_free(buf);
+        return SQLITE_ERROR;
+      }
+    }
     *vector = buf;
-    *dimensions = bytes / sizeof(f32);
+    *dimensions = n;
     *cleanup = sqlite3_free;
     return SQLITE_OK;
   }
@@ -930,6 +939,12 @@ static int fvec_from_value(sqlite3_value *value, f32 **vector,
       }
 
       f32 res = (f32)result;
+      if (isnan(res) || isinf(res)) {
+        sqlite3_free(x.z);
+        *pzErr = sqlite3_mprintf("invalid float32 vector: element %d is %s",
+                                 (int)x.length, isnan(res) ? "NaN" : "Inf");
+        return SQLITE_ERROR;
+      }
       array_append(&x, (const void *)&res);
 
       offset += (endptr - ptr);
@@ -1878,13 +1893,7 @@ static void vec_to_json(sqlite3_context *context, int argc,
       sqlite3_str_appendall(str, ",");
     }
     if (elementType == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
-      f32 value = ((f32 *)vector)[i];
-      if (isnan(value)) {
-        sqlite3_str_appendall(str, "null");
-      } else {
-        sqlite3_str_appendf(str, "%f", value);
-      }
-
+      sqlite3_str_appendf(str, "%f", ((f32 *)vector)[i]);
     } else if (elementType == SQLITE_VEC_ELEMENT_TYPE_INT8) {
       sqlite3_str_appendf(str, "%d", ((i8 *)vector)[i]);
     } else if (elementType == SQLITE_VEC_ELEMENT_TYPE_BIT) {

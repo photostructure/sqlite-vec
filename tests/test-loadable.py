@@ -596,6 +596,31 @@ def test_vec_distance_l1():
     )
 
 
+def test_vec_reject_nan_inf():
+    # NaN distances break KNN ordering, so float32 input rejects NaN and Inf
+    for value, name in [(float("nan"), "NaN"), (float("inf"), "Inf")]:
+        for sign in [1, -1]:
+            blob = struct.pack("4f", 1.0, sign * value, 3.0, 4.0)
+            with pytest.raises(sqlite3.OperationalError, match=f"element 1 is {name}"):
+                db.execute("select vec_length(?)", [blob])
+
+    # 1e39 is a valid JSON number that overflows float32 to Inf
+    with pytest.raises(sqlite3.OperationalError, match="element 1 is Inf"):
+        db.execute("select vec_length('[1.0, 1e39, 3.0]')")
+    # the JSON parser has no NaN or Inf literals
+    with pytest.raises(sqlite3.OperationalError, match="JSON parsing error"):
+        db.execute("select vec_length('[1.0, nan, 3.0]')")
+
+    v = connect(EXT_PATH)
+    v.execute("create virtual table v using vec0(a float[2])")
+    with pytest.raises(sqlite3.OperationalError, match="element 0 is NaN"):
+        v.execute("insert into v(rowid, a) values (1, ?)", [_f32([np.nan, 1.0])])
+    with pytest.raises(sqlite3.OperationalError, match="element 1 is NaN"):
+        v.execute(
+            "select rowid from v where a match ? and k = 1", [_f32([1.0, np.nan])]
+        )
+
+
 def test_vec_distance_l2():
     vec_distance_l2 = lambda *args, a="?", b="?": db.execute(
         f"select vec_distance_l2({a}, {b})", args

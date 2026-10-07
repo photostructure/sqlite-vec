@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `float32` vector input now rejects NaN and ±Inf elements with `invalid float32 vector: element N is NaN` (or `Inf`), ported from [asg017@c4c23bd](https://github.com/asg017/sqlite-vec/commit/c4c23bd). A NaN element makes every distance to that vector NaN, which breaks KNN ordering. This applies to blob and JSON input everywhere a `float32` vector is parsed: `vec0` inserts, updates, and KNN query vectors, and SQL functions such as `vec_distance_l2()` and `vec_to_json()`. JSON numbers that overflow `float32`, such as `1e39`, are rejected as Inf. Vectors already stored in a `vec0` table are not checked when a KNN query scans them, but passing one that contains NaN or Inf to a SQL function now fails.
+
 ### Removed
 
 - Removed the Python, Ruby, Rust, and Lua bindings, their packaging (`setup.py`, `pyproject.toml`, `MANIFEST.in`, `sqlite-vec.gemspec`, `extconf.rb`, `lib/sqlite_vec.rb`, `Cargo.toml`, `build.rs`, `src/lib.rs`, `bindings/`), and their examples. This fork publishes only the npm package. Installing those bindings from `main` (for example `pip install git+https://github.com/photostructure/sqlite-vec`, or the `gem` and `cargo --git` equivalents) no longer works; release tags up to v2.0.2 still include them. Use upstream [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) or [`vlasky/sqlite-vec`](https://github.com/vlasky/sqlite-vec) instead.
