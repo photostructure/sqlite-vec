@@ -17,9 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Forward declaration of the init function */
+/* Forward declarations of the init functions */
 extern int sqlite3_vec_init(sqlite3 *db, char **pzErrMsg,
                             const sqlite3_api_routines *pApi);
+extern int sqlite3_vec_numpy_init(sqlite3 *db, char **pzErrMsg,
+                                  const sqlite3_api_routines *pApi);
 
 #define CHECK_OK(rc, msg)                                                      \
   do {                                                                         \
@@ -895,6 +897,95 @@ cleanup:
   return result;
 }
 
+static int test_unaligned_blob_vectors(void) {
+  printf("Testing vectors bound from unaligned memory...\n");
+  sqlite3 *db = NULL;
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  int result = 1;
+
+  rc = sqlite3_open(":memory:", &db);
+  CHECK_OK(rc, "open database");
+
+  // SQLITE_STATIC blobs reach the extension at the caller's address, so the
+  // vector starts one byte past an 8-byte boundary. UBSan reports any f32
+  // load made directly from it.
+  _Alignas(8) unsigned char buf[1 + 16 * sizeof(float)];
+  float v[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  memcpy(buf + 1, v, sizeof(v));
+
+  rc = sqlite3_prepare_v2(db, "SELECT vec_distance_l2(?1, ?1)", -1, &stmt,
+                          NULL);
+  CHECK_OK(rc, "prepare distance query");
+  sqlite3_bind_blob(stmt, 1, buf + 1, sizeof(v), SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  CHECK_ROW(rc, "distance query");
+  if (sqlite3_column_double(stmt, 0) != 0.0) {
+    fprintf(stderr, "FAILED: distance of a vector to itself is not 0\n");
+    goto cleanup;
+  }
+
+  printf("  PASS: unaligned blob vectors\n");
+  result = 0;
+
+cleanup:
+  if (stmt)
+    sqlite3_finalize(stmt);
+  if (db)
+    sqlite3_close(db);
+  return result;
+}
+
+static int test_npy_unterminated_string(void) {
+  printf("Testing numpy header with an unterminated string...\n");
+  sqlite3 *db = NULL;
+  sqlite3_stmt *stmt = NULL;
+  unsigned char *npy = NULL;
+  int rc;
+  int result = 1;
+
+  rc = sqlite3_open(":memory:", &db);
+  CHECK_OK(rc, "open database");
+
+  // The header ends inside a quoted string, at the end of the allocation,
+  // so ASan reports any read past the header.
+  const char header[] = "{'descr";
+  uint16_t headerLength = sizeof(header) - 1;
+  size_t npyLength = 10 + headerLength;
+  npy = malloc(npyLength);
+  if (!npy) {
+    fprintf(stderr, "FAILED: malloc\n");
+    goto cleanup;
+  }
+  memcpy(npy, "\x93NUMPY\x01\x00", 8);
+  memcpy(npy + 8, &headerLength, sizeof(headerLength));
+  memcpy(npy + 10, header, headerLength);
+
+  rc = sqlite3_vec_numpy_init(db, NULL, NULL);
+  CHECK_OK(rc, "register vec_npy_each");
+  rc = sqlite3_prepare_v2(db, "SELECT * FROM vec_npy_each(?)", -1, &stmt,
+                          NULL);
+  CHECK_OK(rc, "prepare vec_npy_each");
+  sqlite3_bind_blob(stmt, 1, npy, (int)npyLength, SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  if (rc != SQLITE_ERROR) {
+    fprintf(stderr, "FAILED: truncated numpy header was accepted (rc=%d)\n",
+            rc);
+    goto cleanup;
+  }
+
+  printf("  PASS: numpy header with an unterminated string\n");
+  result = 0;
+
+cleanup:
+  if (stmt)
+    sqlite3_finalize(stmt);
+  if (db)
+    sqlite3_close(db);
+  free(npy);
+  return result;
+}
+
 int main(void) {
   printf("sqlite-vec memory test harness\n");
   printf("==============================\n\n");
@@ -920,6 +1011,8 @@ int main(void) {
   failures += test_long_text_metadata_updates();
   failures += test_insert_with_multiple_vectors();
   failures += test_error_path_leaks();
+  failures += test_unaligned_blob_vectors();
+  failures += test_npy_unterminated_string();
 
   printf("\n==============================\n");
   if (failures == 0) {

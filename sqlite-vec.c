@@ -686,10 +686,14 @@ static f32 distance_hamming_u8(u8 *a, u8 *b, size_t n) {
   return (f32)same;
 }
 
-static f32 distance_hamming_u64(u64 *a, u64 *b, size_t n) {
+static f32 distance_hamming_u64(const u8 *a, const u8 *b, size_t n) {
   int same = 0;
   for (unsigned long i = 0; i < n; i++) {
-    same += __builtin_popcountl(a[i] ^ b[i]);
+    // memcpy loads: the blob pointers may not be u64-aligned
+    u64 va, vb;
+    memcpy(&va, a + i * sizeof(u64), sizeof(u64));
+    memcpy(&vb, b + i * sizeof(u64), sizeof(u64));
+    same += __builtin_popcountl(va ^ vb);
   }
   return (f32)same;
 }
@@ -706,7 +710,8 @@ static f32 distance_hamming(const void *a, const void *b, const void *d) {
   size_t dimensions = *((size_t *)d);
 
   if ((dimensions % 64) == 0) {
-    return distance_hamming_u64((u64 *)a, (u64 *)b, dimensions / 8 / CHAR_BIT);
+    return distance_hamming_u64((const u8 *)a, (const u8 *)b,
+                                dimensions / 8 / CHAR_BIT);
   }
   return distance_hamming_u8((u8 *)a, (u8 *)b, dimensions / CHAR_BIT);
 }
@@ -831,8 +836,6 @@ char *type_name(int type) {
 
 typedef void (*fvec_cleanup)(void *vector);
 
-void fvec_cleanup_noop(void *_) { UNUSED_PARAMETER(_); }
-
 static int fvec_from_value(sqlite3_value *value, f32 **vector,
                            size_t *dimensions, fvec_cleanup *cleanup,
                            char **pzErr) {
@@ -851,9 +854,16 @@ static int fvec_from_value(sqlite3_value *value, f32 **vector,
                                sizeof(f32), bytes);
       return SQLITE_ERROR;
     }
-    *vector = (f32 *)blob;
+    // copy rather than alias the blob: it may not be f32-aligned
+    f32 *buf = sqlite3_malloc(bytes);
+    if (!buf) {
+      *pzErr = sqlite3_mprintf("out of memory");
+      return SQLITE_NOMEM;
+    }
+    memcpy(buf, blob, bytes);
+    *vector = buf;
     *dimensions = bytes / sizeof(f32);
-    *cleanup = fvec_cleanup_noop;
+    *cleanup = sqlite3_free;
     return SQLITE_OK;
   }
 
@@ -1116,8 +1126,8 @@ int vector_from_value(sqlite3_value *value, void **vector, size_t *dimensions,
   int subtype = sqlite3_value_subtype(value);
   if (!subtype || (subtype == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) ||
       (subtype == JSON_SUBTYPE)) {
-    int rc = fvec_from_value(value, (f32 **)vector, dimensions,
-                             (fvec_cleanup *)cleanup, pzErrorMessage);
+    int rc = fvec_from_value(value, (f32 **)vector, dimensions, cleanup,
+                             pzErrorMessage);
     if (rc == SQLITE_OK) {
       *element_type = SQLITE_VEC_ELEMENT_TYPE_FLOAT32;
     }
@@ -1598,7 +1608,12 @@ static void vec_quantize_int8(sqlite3_context *context, int argc,
   }
   f32 step = (1.0 - (-1.0)) / 255;
   for (size_t i = 0; i < dimensions; i++) {
-    out[i] = ((srcVector[i] - (-1.0)) / step) - 128;
+    double val = ((srcVector[i] - (-1.0)) / step) - 128;
+    if (!(val <= 127.0))
+      val = 127.0; /* also clamps NaN */
+    if (!(val >= -128.0))
+      val = -128.0;
+    out[i] = (i8)val;
   }
 
   sqlite3_result_blob(context, out, dimensions * sizeof(i8), sqlite3_free);
@@ -2852,7 +2867,7 @@ int npy_token_next(unsigned char *start, unsigned char *end,
         }
         ptr++;
       }
-      if ((*ptr) != '\'') {
+      if (ptr >= end || (*ptr) != '\'') {
         return VEC0_TOKEN_RESULT_ERROR;
       }
       out->start = start;

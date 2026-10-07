@@ -833,12 +833,14 @@ def test_vec_to_json():
     assert vec_to_json(b"\x0f", input="vec_bit(?)") == "[1,1,1,1,0,0,0,0]"
 
 
-@pytest.mark.skip(reason="TODO")
 def test_vec_quantize_int8():
-    vec_quantize_int8 = lambda *args: db.execute(
-        "select vec_quantize_int8()", args
+    vec_quantize_int8 = lambda v: db.execute(
+        "select vec_quantize_int8(?, 'unit')", [v]
     ).fetchone()[0]
-    assert vec_quantize_int8() == 111
+    # step is computed in float32, so 1.0 lands just below 127 and truncates
+    assert vec_quantize_int8("[-1, 0, 1]") == _int8([-128, 0, 126])
+    # values outside [-1, 1] clamp instead of overflowing the int8 conversion
+    assert vec_quantize_int8("[-2, 2, -1000, 1000]") == _int8([-128, 127, -128, 127])
 
 
 def test_vec_quantize_binary():
