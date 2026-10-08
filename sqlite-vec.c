@@ -3477,7 +3477,7 @@ static int vec_npy_eachFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
 #ifndef SQLITE_VEC_OMIT_FS
   struct VecNpyFile *f = NULL;
   if ((f = sqlite3_value_pointer(argv[0], SQLITE_VEC_NPY_FILE_NAME))) {
-    FILE *file = fopen(f->path, "r");
+    FILE *file = fopen(f->path, "rb");
     if (!file) {
       vtab_set_error(pVtabCursor->pVtab, "Could not open numpy file");
       return SQLITE_ERROR;

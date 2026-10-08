@@ -2265,6 +2265,20 @@ def test_vec_npy_each_errors_files():
     assert len(x1025) == 1025
 
 
+@pytest.mark.parametrize("data", [b"\x1a\x00\x80\x3f", b"\x0d\x0a\x80\x3f"])
+def test_vec_npy_file_binary_mode(tmp_path, data):
+    # Windows text streams treat 0x1a as EOF and translate CRLF to LF.
+    db = connect(EXT_PATH, extra_entrypoint="sqlite3_vec_numpy_init")
+    array = np.frombuffer(data, dtype="<f4").reshape(1, 1)
+    path = tmp_path / "binary.npy"
+    path.write_bytes(to_npy(array))
+    assert execute_all(
+        db,
+        "select rowid, vector from vec_npy_each(vec_npy_file(?))",
+        [str(path)],
+    ) == [{"rowid": 0, "vector": data}]
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="long is 32 bits on Windows, so ftell() can't report a 2 GiB file size",
