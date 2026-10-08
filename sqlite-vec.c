@@ -7998,9 +7998,7 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
             aMetadataIn, i);
         if (rc != SQLITE_OK) {
           vtab_set_error(&p->base, "Could not filter metadata fields");
-          if (rc != SQLITE_OK) {
-            goto cleanup;
-          }
+          goto cleanup;
         }
         bitmap_and_inplace(b, bmMetadata, p->chunk_size);
       }
