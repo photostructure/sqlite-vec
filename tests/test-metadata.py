@@ -221,6 +221,16 @@ def test_text_range_matches_plain_table(db):
             _assert_knn_filter_matches_plain(db, f"t {op} ?", [target])
 
 
+def test_text_like_glob_matches_plain_table(db):
+    # "x" * 12 is followed by a row whose stored length is 13, and "a" * 12 is
+    # row 8, the last row of the first chunk. Matching used to run past both.
+    _create_text_filter_tables(db)
+    for pattern in ["%x", "%a", "x%", "a%", "%c", "_bc", "%\u00e9", "_" * 13]:
+        _assert_knn_filter_matches_plain(db, "t like ?", [pattern])
+    for pattern in ["*x", "*a", "x*", "a*", "*[cd]", "?bc", "?" * 13]:
+        _assert_knn_filter_matches_plain(db, "t glob ?", [pattern])
+
+
 def test_types(db, snapshot):
     db.execute(
         "create virtual table v using vec0(vector float[1], b boolean, n int, f float, t text, chunk_size=8)"

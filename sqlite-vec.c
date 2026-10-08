@@ -7079,8 +7079,12 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
 
         // For short strings, use cached value directly
         if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
+          // a 12-byte value fills the view without a NUL terminator
+          char zPrefix[VEC0_METADATA_TEXT_VIEW_DATA_LENGTH + 1];
+          memcpy(zPrefix, sPrefix, nPrefix);
+          zPrefix[nPrefix] = '\0';
           // sqlite3_strlike returns 0 on match, non-zero otherwise
-          bitmap_set(b, i, sqlite3_strlike(sTarget, sPrefix, 0) == 0);
+          bitmap_set(b, i, sqlite3_strlike(sTarget, zPrefix, 0) == 0);
           continue;
         }
 
@@ -7168,8 +7172,12 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
 
         // For short strings, use cached value directly
         if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
+          // a 12-byte value fills the view without a NUL terminator
+          char zPrefix[VEC0_METADATA_TEXT_VIEW_DATA_LENGTH + 1];
+          memcpy(zPrefix, sPrefix, nPrefix);
+          zPrefix[nPrefix] = '\0';
           // sqlite3_strglob returns 0 on match, non-zero otherwise
-          bitmap_set(b, i, sqlite3_strglob(sTarget, sPrefix) == 0);
+          bitmap_set(b, i, sqlite3_strglob(sTarget, zPrefix) == 0);
           continue;
         }
 
