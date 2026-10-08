@@ -6642,9 +6642,10 @@ static int vec0_is_prefix_only_glob_pattern(const char *pattern, int n) {
   if (pattern[n - 1] != '*')
     return 0;
 
-  // Check for wildcards in the prefix (before the trailing '*')
+  // Check for wildcards and character classes in the prefix (before the
+  // trailing '*')
   for (int i = 0; i < n - 1; i++) {
-    if (pattern[i] == '*' || pattern[i] == '?') {
+    if (pattern[i] == '*' || pattern[i] == '?' || pattern[i] == '[') {
       return 0;
     }
   }

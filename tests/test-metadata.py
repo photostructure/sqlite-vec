@@ -237,6 +237,9 @@ def test_text_like_glob_matches_plain_table(db):
         _assert_knn_filter_matches_plain(db, "t like ?", [pattern])
     for pattern in ["*x", "*a", "x*", "a*", "*[cd]", "?bc", "?" * 13]:
         _assert_knn_filter_matches_plain(db, "t glob ?", [pattern])
+    # "[" starts a character class, so these are not literal prefixes
+    for pattern in ["[ab]*", "[a]*", "a[b]*"]:
+        _assert_knn_filter_matches_plain(db, "t glob ?", [pattern])
 
 
 def test_types(db, snapshot):
