@@ -279,7 +279,7 @@ After deletes, reclaim space:
 -- Compact shadow tables
 INSERT INTO vec_examples(vec_examples) VALUES('optimize');
 
-- Flush WAL
+-- Flush WAL
 PRAGMA wal_checkpoint(TRUNCATE);
 
 -- Reclaim freed pages (if using auto_vacuum=INCREMENTAL)
