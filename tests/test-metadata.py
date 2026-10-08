@@ -191,6 +191,20 @@ def test_types(db, snapshot):
     )
 
 
+def test_boolean_rejects_integers_beyond_32_bits(db):
+    # the low 32 bits of 2**32 and 2**32 + 1 are 0 and 1
+    db.execute(
+        "create virtual table v using vec0(vector float[1], b boolean, chunk_size=8)"
+    )
+    db.execute("insert into v(rowid, vector, b) values (1, '[1]', 1)")
+    for value in [2**32, 2**32 + 1]:
+        with pytest.raises(sqlite3.OperationalError, match="Expected 0 or 1"):
+            db.execute("insert into v(rowid, vector, b) values (2, '[2]', ?)", [value])
+        with pytest.raises(sqlite3.OperationalError, match="Expected 0 or 1"):
+            db.execute("update v set b = ? where rowid = 1", [value])
+    assert [tuple(row) for row in db.execute("select rowid, b from v")] == [(1, 1)]
+
+
 def test_rejected_insert_leaves_no_row(db):
     # vec0 writes its shadow tables through separate statements that a failed
     # INSERT does not roll back, so value types are checked before any write

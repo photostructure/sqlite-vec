@@ -9523,7 +9523,7 @@ static int vec0_validate_metadata_value(vec0_vtab *p, int metadata_column_idx,
   switch (metadata_column->kind) {
   case VEC0_METADATA_COLUMN_KIND_BOOLEAN: {
     if (sqlite3_value_type(v) != SQLITE_INTEGER ||
-        ((sqlite3_value_int(v) != 0) && (sqlite3_value_int(v) != 1))) {
+        ((sqlite3_value_int64(v) != 0) && (sqlite3_value_int64(v) != 1))) {
       vtab_set_error(&p->base,
                      "Expected 0 or 1 for BOOLEAN metadata column %.*s",
                      metadata_column->name_length, metadata_column->name);
