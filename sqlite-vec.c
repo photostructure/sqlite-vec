@@ -5262,15 +5262,20 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
 
   sqlite3_str *createStr = sqlite3_str_new(NULL);
   sqlite3_str_appendall(createStr, "CREATE TABLE x(");
+  // vec0 stores only integer rowids, and an integer primary key is stored as
+  // the rowid. Declaring that column INTEGER makes SQLite compare a value with
+  // it as it does with an ordinary table's rowid, so `rowid > '3'` reads '3' as
+  // the number 3.
   if (pkColumnName) {
-    sqlite3_str_appendf(createStr, "\"%.*w\" primary key, ", pkColumnNameLength,
-                        pkColumnName);
+    sqlite3_str_appendf(createStr, "\"%.*w\" %sprimary key, ",
+                        pkColumnNameLength, pkColumnName,
+                        pkColumnType == SQLITE_INTEGER ? "integer " : "");
     if (pkColumnNameLength == tableNameLength &&
         sqlite3_strnicmp(pkColumnName, tableName, tableNameLength) == 0) {
       hasCommandColumn = 0;
     }
   } else {
-    sqlite3_str_appendall(createStr, "rowid, ");
+    sqlite3_str_appendall(createStr, "rowid integer, ");
     if (sqlite3_stricmp(tableName, "rowid") == 0) {
       hasCommandColumn = 0;
     }
@@ -6619,21 +6624,21 @@ static int vec0_is_prefix_only_glob_pattern(const char *pattern, int n) {
 // A KNN query's filters compare a constraint's value with a row's value by
 // SQLite's rules
 // (https://www.sqlite.org/datatype3.html#comparison_expressions). vec0 declares
-// its columns without a type, so SQLite converts neither value when it compares
-// one with a bound parameter or a literal: NULL compares with nothing, INTEGER
-// and REAL values compare numerically, every number is less than any TEXT, and
-// every TEXT is less than any BLOB. A filter sees only the value, not the
-// expression that produced it, so it compares every value this way. SQLite
-// itself converts a column's TEXT to a number when the other side has numeric
-// affinity, so a TEXT '5' equals CAST(5 AS INTEGER) in a plain scan but not in
-// a KNN query's filter.
+// its metadata columns and `distance` without a type, so SQLite converts
+// neither value when it compares one with a bound parameter or a literal: NULL
+// compares with nothing, INTEGER and REAL values compare numerically, every
+// number is less than any TEXT, and every TEXT is less than any BLOB. A filter
+// sees only the value, not the expression that produced it, so it compares
+// every value this way. SQLite itself converts a column's TEXT to a number when
+// the other side has numeric affinity, so a TEXT '5' equals CAST(5 AS INTEGER)
+// in a plain scan but not in a KNN query's filter.
 // A `distance` filter still rounds a numeric value to float before comparing.
-// vec0's `rowid` column is untyped too, so SQLite's own `rowid > '3'` matches
-// no row, but vec0's rowid lookups (`rowid = ?` without `match`, and a KNN
-// query's `rowid in (...)` of two or more values) apply numeric affinity to
-// the value first, as SQLite does for an INTEGER PRIMARY KEY, so '5' finds
-// rowid 5. In a KNN query SQLite compares `rowid = ?`, and a one-value
-// `rowid in (?)`, with the column itself.
+// vec0 declares its `rowid` column, or an integer primary key column, INTEGER,
+// so SQLite applies numeric affinity to a value it compares with that column,
+// as with an ordinary table's rowid. vec0's own rowid lookups (`rowid = ?`
+// without `match`, and a KNN query's `rowid in (...)` of two or more values)
+// do the same, as SQLite does for an INTEGER PRIMARY KEY, so '5' finds rowid 5
+// either way.
 
 // Whether a comparison holds, given the sign of a row's value compared with
 // the constraint's value.

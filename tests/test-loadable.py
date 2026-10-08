@@ -1729,6 +1729,56 @@ def test_vec0_rowid_update_delete_values():
     ] == [(0, "[1.000000]"), (5, "[2.000000]")]
 
 
+def test_vec0_integer_key_column_is_integer():
+    # vec0 declares its rowid column, or an integer primary key column,
+    # INTEGER, so SQLite converts a value it compares with the column as it does
+    # for `plain`'s integer primary key, also where SQLite evaluates the
+    # constraint itself: a range on a full scan, and `= ?` or a one-value
+    # `in (?)` in a KNN query
+    db = connect(EXT_PATH)
+    db.execute("create table plain(id integer primary key)")
+    db.executemany("insert into plain values (?)", [[1], [5], [6]])
+
+    def keys(sql, values):
+        return sorted(row[0] for row in db.execute(sql, values))
+
+    mismatches = []
+    types = []
+    for table, key, declaration in [
+        ("v1", "rowid", ""),
+        ("v2", "rowid", "rowid integer primary key, "),
+        ("v3", "id", "id integer primary key, "),
+    ]:
+        db.execute(
+            f"create virtual table {table} using vec0({declaration}a float[1], chunk_size=8)"
+        )
+        for id in [1, 5, 6]:
+            db.execute(f"insert into {table}({key}, a) values (?, ?)", [id, f"[{id}]"])
+        for where, values in [
+            ("{key} > ?", ["3"]),
+            ("{key} between ? and ?", ["2", "5"]),
+            ("{key} = ?", ["5"]),
+            ("{key} in (?)", ["5"]),
+            ("{key} in (?, ?)", ["5", 6]),
+        ]:
+            want = keys("select id from plain where " + where.format(key="id"), values)
+            for sql in [
+                f"select {key} from {table} where ",
+                f"select {key} from {table} where a match '[0]' and k = 10 and ",
+            ]:
+                sql += where.format(key=key)
+                got = keys(sql, values)
+                if got != want:
+                    mismatches.append((sql, values, got, want))
+        types += [
+            (row[1], row[2])
+            for row in db.execute(f"pragma table_xinfo({table})")
+            if row[0] == 0
+        ]
+    assert mismatches == []
+    assert types == [("rowid", "INTEGER"), ("rowid", "INTEGER"), ("id", "INTEGER")]
+
+
 def test_vec0_text_pk():
     db = connect(EXT_PATH)
     db.execute("""
