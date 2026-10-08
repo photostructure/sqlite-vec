@@ -6851,8 +6851,8 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         bitmap_set(b, i, 0);
         continue;
       }
-      int cmpPrefix = strncmp(
-          sPrefix, sTarget, min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
+      int cmpPrefix = memcmp(sPrefix, sTarget,
+                             min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
 
       // for short strings, use the prefix comparison direclty
       if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
@@ -6874,7 +6874,7 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         rc = SQLITE_ERROR;
         goto done;
       }
-      bitmap_set(b, i, strncmp(sFull, sTarget, nFull) == 0);
+      bitmap_set(b, i, memcmp(sFull, sTarget, nFull) == 0);
     }
     break;
   }
@@ -6890,8 +6890,8 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         continue;
       }
 
-      int cmpPrefix = strncmp(
-          sPrefix, sTarget, min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
+      int cmpPrefix = memcmp(sPrefix, sTarget,
+                             min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
 
       // for short strings, use the prefix comparison direclty
       if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
@@ -6913,7 +6913,7 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         rc = SQLITE_ERROR;
         goto done;
       }
-      bitmap_set(b, i, strncmp(sFull, sTarget, nFull) != 0);
+      bitmap_set(b, i, memcmp(sFull, sTarget, nFull) != 0);
     }
     break;
   }
@@ -6983,8 +6983,8 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
           continue;
         }
         int cmpPrefix =
-            strncmp(sPrefix, entry->zString,
-                    min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
+            memcmp(sPrefix, entry->zString,
+                   min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
         if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
           if (cmpPrefix == 0) {
             bitmap_set(b, i, 1);
@@ -7005,7 +7005,7 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
           rc = SQLITE_ERROR;
           goto done;
         }
-        if (strncmp(sFull, entry->zString, nFull) == 0) {
+        if (memcmp(sFull, entry->zString, nFull) == 0) {
           bitmap_set(b, i, 1);
           break;
         }
@@ -8432,11 +8432,14 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
         int n = sqlite3_value_bytes(entry);
 
         struct Vec0MetadataInTextEntry textEntry;
-        textEntry.zString = sqlite3_mprintf("%.*s", n, s);
+        textEntry.zString = sqlite3_malloc(n + 1);
         if (!textEntry.zString) {
           rc = SQLITE_NOMEM;
           goto item_text_cleanup;
         }
+        // copy all n bytes, including any embedded NUL
+        memcpy(textEntry.zString, s, n);
+        textEntry.zString[n] = '\0';
         textEntry.n = n;
         rc = array_append(&item.array, &textEntry);
         if (rc != SQLITE_OK) {

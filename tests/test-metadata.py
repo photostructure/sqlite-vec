@@ -221,6 +221,14 @@ def test_text_range_matches_plain_table(db):
             _assert_knn_filter_matches_plain(db, f"t {op} ?", [target])
 
 
+def test_text_equality_matches_plain_table(db):
+    _create_text_filter_tables(db)
+    for target in TEXT_FILTER_VALUES:
+        for op in ["=", "!=", "is", "is not"]:
+            _assert_knn_filter_matches_plain(db, f"t {op} ?", [target])
+        _assert_knn_filter_matches_plain(db, "t in (?, 'nonsense')", [target])
+
+
 def test_text_like_glob_matches_plain_table(db):
     # "x" * 12 is followed by a row whose stored length is 13, and "a" * 12 is
     # row 8, the last row of the first chunk. Matching used to run past both.
