@@ -8114,8 +8114,10 @@ static f32 vec0_compute_distance(struct VectorColumnDefinition *vector_column,
  * candidate with the best MMR score:
  *   MMR(d) = lambda * relevance(d) - (1-lambda) * max_sim(d, S)
  *
- * where relevance = 1 - normalized_distance, and max_sim is the maximum
- * cosine similarity between d and any already-selected result.
+ * where relevance = 1 - normalized_distance, and max_sim is the highest
+ * 1 - distance / max_dist between d and any already-selected result, floored
+ * at 0, in the column's distance metric, with max_dist the largest candidate
+ * distance.
  *
  * Reorders topk_rowids and topk_distances in place.
  * After return, the first *out_n_selected entries are the MMR-selected results.
