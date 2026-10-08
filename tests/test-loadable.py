@@ -2279,29 +2279,42 @@ def test_vec_npy_file_binary_mode(tmp_path, data):
     ) == [{"rowid": 0, "vector": data}]
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="long is 32 bits on Windows, so ftell() can't report a 2 GiB file size",
-)
-def test_vec_npy_file_over_2gib():
-    # the data size used to be truncated to an i32, so a file with more than
-    # 2 GiB of data failed with "numpy array file header length is invalid"
+def test_vec_npy_file_over_2gib(tmp_path):
+    # Regression for both 32-bit data-size arithmetic and Windows ftell().
     db = connect(EXT_PATH, extra_entrypoint="sqlite3_vec_numpy_init")
     rows, dimensions = 524289, 1024
-    with tempfile.NamedTemporaryFile(delete_on_close=False) as f:
+    path = tmp_path / "large.npy"
+    with path.open("w+b") as f:
+        if sys.platform == "win32":
+            import ctypes
+            import msvcrt
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            bytes_returned = ctypes.c_ulong()
+            # FSCTL_SET_SPARSE: NTFS files aren't sparse by default.
+            if not kernel32.DeviceIoControl(
+                ctypes.c_void_p(msvcrt.get_osfhandle(f.fileno())),
+                0x900C4,
+                None,
+                0,
+                None,
+                0,
+                ctypes.byref(bytes_returned),
+                None,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
         np.lib.format.write_array_header_1_0(
             f, {"descr": "<f4", "fortran_order": False, "shape": (rows, dimensions)}
         )
-        # sparse, so the 2 GiB of zeros take no disk space
-        f.truncate(f.tell() + rows * dimensions * 4)
-        f.close()
-        assert execute_all(
-            db,
-            "select count(*) as n, max(length(vector)) as size from vec_npy_each(vec_npy_file(?))",
-            [f.name],
-        ) == [{"n": rows, "size": dimensions * 4}]
-
-    # np.array([[.1, .2, 3]] * 99, dtype=np.float32).shape
+        # Seeking leaves a sparse hole; Windows truncate() writes zeros even
+        # after FSCTL_SET_SPARSE and can still allocate most of the 2 GiB.
+        f.seek(f.tell() + rows * dimensions * 4 - 1)
+        f.write(b"\0")
+    assert execute_all(
+        db,
+        "select count(*) as n, max(length(vector)) as size from vec_npy_each(vec_npy_file(?))",
+        [str(path)],
+    ) == [{"n": rows, "size": dimensions * 4}]
 
 
 def test_vec0_constructor():

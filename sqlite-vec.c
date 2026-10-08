@@ -1,3 +1,14 @@
+// Enable POSIX large-file offsets and fseeko()/ftello() declarations, including
+// when downstream builds use strict ISO C compiler flags.
+#if !defined(_WIN32) && !defined(SQLITE_VEC_OMIT_FS)
+#ifndef _FILE_OFFSET_BITS
+#define _FILE_OFFSET_BITS 64
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
+
 #include "sqlite-vec.h"
 
 #include <assert.h>
@@ -3215,10 +3226,19 @@ static int npy_data_size(size_t numElements, size_t numDimensions,
 #ifndef SQLITE_VEC_OMIT_FS
 int parse_npy_file(sqlite3_vtab *pVTab, FILE *file, vec_npy_each_cursor *pCur) {
   int n;
-  fseek(file, 0, SEEK_END);
-  long fileSize = ftell(file);
-
-  fseek(file, 0L, SEEK_SET);
+#ifdef _WIN32
+  int seekResult = _fseeki64(file, 0, SEEK_END);
+  sqlite3_int64 fileSize = _ftelli64(file);
+  int rewindResult = _fseeki64(file, 0, SEEK_SET);
+#else
+  int seekResult = fseeko(file, 0, SEEK_END);
+  sqlite3_int64 fileSize = ftello(file);
+  int rewindResult = fseeko(file, 0, SEEK_SET);
+#endif
+  if (seekResult != 0 || fileSize < 0 || rewindResult != 0) {
+    vtab_set_error(pVTab, "Could not determine numpy file size");
+    return SQLITE_ERROR;
+  }
 
   unsigned char header[10];
   n = fread(&header, sizeof(unsigned char), 10, file);
@@ -3240,11 +3260,11 @@ int parse_npy_file(sqlite3_vtab *pVTab, FILE *file, vec_npy_each_cursor *pCur) {
 
   size_t totalHeaderLength = sizeof(NPY_MAGIC) + sizeof(major) + sizeof(minor) +
                              sizeof(headerLength) + headerLength;
-  if (fileSize < 0 || (size_t)fileSize < totalHeaderLength) {
+  if ((sqlite3_uint64)fileSize < totalHeaderLength) {
     vtab_set_error(pVTab, "numpy array file header length is invalid");
     return SQLITE_ERROR;
   }
-  size_t dataSize = (size_t)fileSize - totalHeaderLength;
+  sqlite3_uint64 dataSize = (sqlite3_uint64)fileSize - totalHeaderLength;
 
   unsigned char *headerX = sqlite3_malloc(headerLength);
   if (headerLength && !headerX) {
