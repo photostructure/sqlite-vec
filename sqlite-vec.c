@@ -7743,7 +7743,6 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
     i64 rowidsSize = sqlite3_column_bytes(stmtChunks, 2);
     if (rowidsSize != (i64)(p->chunk_size * sizeof(i64))) {
       // IMP: V02796_19635
-      vtab_set_error(&p->base, "rowids size doesn't match");
       vtab_set_error(
           &p->base,
           "chunk rowids size doesn't match - expected %lld, found %lld",
