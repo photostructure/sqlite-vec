@@ -9545,15 +9545,6 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     goto cleanup;
   }
 
-  // Cannot insert a value in the hidden "table_name" column
-  if (sqlite3_value_type(argv[2 + vec0_column_table_name_idx(p)]) !=
-      SQLITE_NULL) {
-    vtab_set_error(
-        pVTab, "A value was provided for the hidden \"table_name\" column.");
-    rc = SQLITE_ERROR;
-    goto cleanup;
-  }
-
   // Check auxiliary and metadata value types before the first write: the
   // shadow-table writes below are not rolled back if the INSERT fails.
   for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
