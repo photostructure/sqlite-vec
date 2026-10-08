@@ -1046,7 +1046,7 @@ def test_vec0_inserts():
     db.execute("insert into t1(aaa) values ('[3,3,3,3]')")
 
     # EVIDENCE-OF: V30855_14925 vec0 INSERT non-integer/text primary key value rauses error
-    with _raises("Only integers are allows for primary key values on t1"):
+    with _raises("Only integers are allowed for primary key values on t1"):
         db.execute("insert into t1 values (1.2, '[4,4,4,4]')")
 
     # similate error on rowids shadow table, when rowid is not provided

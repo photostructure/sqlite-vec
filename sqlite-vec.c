@@ -9141,7 +9141,7 @@ int vec0Update_InsertRowidStep(vec0_vtab *p, sqlite3_value *idValue,
   if (sqlite3_value_type(idValue) != SQLITE_NULL) {
     // IMP: V30855_14925
     vtab_set_error(&p->base,
-                   "Only integers are allows for primary key values on %s",
+                   "Only integers are allowed for primary key values on %s",
                    p->tableName);
     return SQLITE_ERROR;
   }
