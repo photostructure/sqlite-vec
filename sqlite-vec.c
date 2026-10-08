@@ -10451,6 +10451,20 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
     }
   } else {
     rowid = sqlite3_value_int64(argv[0]);
+    // On a table without a primary key column, `SET oid = ...` puts the new
+    // key in argv[1] and `SET rowid = ...` in argv[2 + VEC0_COLUMN_ID]; on a
+    // table with one, both hold the new key. As for an ordinary table's
+    // INTEGER PRIMARY KEY, a value that converts to the same integer, such as
+    // '1' or 1.0 for 1, leaves the key unchanged.
+    sqlite3_value *newKeys[] = {argv[1], argv[2 + VEC0_COLUMN_ID]};
+    for (int i = 0; i < 2; i++) {
+      i64 newRowid;
+      if (!vec0_value_as_rowid(newKeys[i], &newRowid) || newRowid != rowid) {
+        vtab_set_error(pVTab,
+                       "UPDATEs on vec0 primary key values are not allowed.");
+        return SQLITE_ERROR;
+      }
+    }
   }
 
   // 1) get chunk_id and chunk_offset from _rowids

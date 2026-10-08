@@ -1921,6 +1921,95 @@ def test_vec0_text_pk():
             db.execute("update t set t_id = ? where t_id = ?", [new_id, old_id])
 
 
+def test_vec0_integer_key_update():
+    # an UPDATE that changes an integer key fails, as for a text key, and
+    # changes nothing. A value is the same key if `plain`'s integer primary key
+    # keeps it: SQLite converts '1' and 1.0 to 1, rejects 'abc' and 1.5, and
+    # reads no REAL as either int64 limit
+    cases = [
+        (
+            1,
+            [1, "1", 1.0, "1.0", " 1 ", "1e0"],
+            [50, 2, "50", 50.0, 1.5, "1.5", "abc", "1abc", "", None, b"1"],
+        ),
+        # a double cannot tell 2**53 + 1 from 2**53
+        (2**53 + 1, [2**53 + 1, str(2**53 + 1)], [2**53, float(2**53)]),
+        (2**63 - 1, [2**63 - 1, str(2**63 - 1)], [float(2**63 - 1), str(2**63)]),
+        (-(2**63), [-(2**63), str(-(2**63))], [float(-(2**63)), str(-(2**63) - 1)]),
+    ]
+    keys = sorted([key for key, _, _ in cases] + [2])
+
+    def plain_keeps(key, value):
+        plain = sqlite3.connect(":memory:")
+        plain.execute("create table plain(id integer primary key)")
+        plain.executemany("insert into plain values (?)", [[k] for k in keys])
+        try:
+            plain.execute("update plain set id = ? where id = ?", [value, key])
+        except sqlite3.IntegrityError:
+            return False
+        return plain.execute("select id from plain order by id").fetchall() == [
+            (k,) for k in keys
+        ]
+
+    for key, same, changed in cases:
+        assert [value for value in same if not plain_keeps(key, value)] == []
+        assert [value for value in changed if plain_keeps(key, value)] == []
+
+    db = connect(EXT_PATH)
+    for table, column, declaration in [
+        ("v1", "rowid", ""),
+        ("v2", "rowid", "rowid integer primary key, "),
+        ("v3", "id", "id integer primary key, "),
+    ]:
+        db.execute(
+            f"create virtual table {table} using vec0({declaration}a float[1], chunk_size=8)"
+        )
+        db.executemany(
+            f"insert into {table}({column}, a) values (?, '[0]')", [[k] for k in keys]
+        )
+
+        def rows():
+            return [
+                tuple(row)
+                for row in db.execute(
+                    f"select {column}, vec_to_json(a) from {table} order by {column}"
+                )
+            ]
+
+        for key, same, changed in cases:
+            before = rows()
+            for value in changed:
+                with _raises("UPDATEs on vec0 primary key values are not allowed."):
+                    db.execute(
+                        f"update {table} set {column} = ?, a = '[9]' where {column} = ?",
+                        [value, key],
+                    )
+            assert rows() == before
+
+            for i, value in enumerate(same):
+                db.execute(
+                    f"update {table} set {column} = ?, a = ? where {column} = ?",
+                    [value, f"[{i + 1}]", key],
+                )
+                assert rows() == [
+                    (k, f"[{i + 1}.000000]" if k == key else a) for k, a in before
+                ]
+
+        before = rows()
+        db.execute(f"update {table} set a = '[7]' where {column} = 2")
+        assert rows() == [(k, "[7.000000]" if k == 2 else a) for k, a in before]
+
+    # without a primary key column, oid and _rowid_ name the same key
+    for column in ["oid", "_rowid_"]:
+        with _raises("UPDATEs on vec0 primary key values are not allowed."):
+            db.execute(f"update v1 set {column} = 50 where rowid = 1")
+        db.execute(f"update v1 set {column} = '1', a = '[8]' where rowid = 1")
+        assert (
+            db.execute("select vec_to_json(a) from v1 where rowid = 1").fetchone()[0]
+            == "[8.000000]"
+        )
+
+
 def test_vec0_best_index():
     db = connect(EXT_PATH)
     db.execute("""
