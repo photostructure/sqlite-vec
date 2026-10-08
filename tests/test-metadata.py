@@ -1427,6 +1427,27 @@ def test_knn_text_filter_null_long_value(db):
         )
 
 
+def test_knn_metadata_filter_error_message(db):
+    # A KNN query with a metadata filter once set "Could not open metadata
+    # blob" on success, and SQLite reported it for a later error that sets no
+    # message of its own, such as an interrupt.
+    db.execute(
+        "create virtual table v using vec0(vector float[1], m integer, chunk_size=8)"
+    )
+    db.executemany(
+        "insert into v(rowid, vector, m) values (?, ?, 1)",
+        [(i, f"[{i}]") for i in range(1, 6)],
+    )
+    cursor = db.execute(
+        "select rowid from v where vector match '[1]' and k = 5 and m = 1"
+    )
+    cursor.fetchone()
+    db.set_progress_handler(lambda: 1, 1)
+    with pytest.raises(sqlite3.OperationalError, match="^interrupted$"):
+        cursor.fetchall()
+    db.set_progress_handler(None, 1)
+
+
 def authorizer_deny_on(operation, x1, x2=None):
     def _auth(op, p1, p2, p3, p4):
         if op == operation and p1 == x1 and p2 == x2:

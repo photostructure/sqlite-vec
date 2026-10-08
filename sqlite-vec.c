@@ -7813,8 +7813,8 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
           rc = sqlite3_blob_open(
               p->db, p->schemaName, p->shadowMetadataChunksNames[metadata_idx],
               "data", chunk_id, 0, &metadataBlobs[metadata_idx]);
-          vtab_set_error(&p->base, "Could not open metadata blob");
           if (rc != SQLITE_OK) {
+            vtab_set_error(&p->base, "Could not open metadata blob");
             goto cleanup;
           }
         }
