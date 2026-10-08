@@ -2133,6 +2133,29 @@ int vec0_scanner_next(struct Vec0Scanner *scanner, struct Vec0Token *out) {
   return rc;
 }
 
+/**
+ * @brief Whether an identifier token is the given keyword, compared ASCII
+ * case-insensitively.
+ *
+ * The partition key, primary key, auxiliary, and metadata column parsers are
+ * strict only when creating a table: CREATE requires whole keywords and nothing
+ * after the definition. CREATE used to accept any prefix of a keyword, such as
+ * `te` for `text`, and ignore tokens after the definition, such as `collate
+ * nocase`. vec0 re-parses the stored declaration on every connect, so connect
+ * still accepts both, and tables declared that way still open.
+ *
+ * @param isCreate: true to require the whole keyword, false to accept any
+ * prefix of it.
+ */
+static int vec0_token_is_keyword(const struct Vec0Token *token,
+                                 const char *keyword, bool isCreate) {
+  int n = token->end - token->start;
+  if (isCreate && n != (int)strlen(keyword)) {
+    return 0;
+  }
+  return sqlite3_strnicmp(token->start, keyword, n) == 0;
+}
+
 int vec0_parse_table_option(const char *source, int source_length,
                             char **out_key, int *out_key_length,
                             char **out_value, int *out_value_length) {
@@ -2187,12 +2210,14 @@ int vec0_parse_table_option(const char *source, int source_length,
  * Same lifetime as source, points to specific char *
  * @param out_column_name_length: Length of out_column_name in bytes
  * @param out_column_type: SQLITE_TEXT or SQLITE_INTEGER.
+ * @param isCreate: true when creating the table, which requires whole keywords
+ * and nothing after the definition, see vec0_token_is_keyword().
  * @return int: SQLITE_EMPTY if not a PK, SQLITE_OK if it is.
  */
 int vec0_parse_partition_key_definition(const char *source, int source_length,
                                         char **out_column_name,
                                         int *out_column_name_length,
-                                        int *out_column_type) {
+                                        int *out_column_type, bool isCreate) {
   struct Vec0Scanner scanner;
   struct Vec0Token token;
   char *column_name;
@@ -2216,12 +2241,10 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  if (sqlite3_strnicmp(token.start, "text", token.end - token.start) == 0) {
+  if (vec0_token_is_keyword(&token, "text", isCreate)) {
     column_type = SQLITE_TEXT;
-  } else if (sqlite3_strnicmp(token.start, "int", token.end - token.start) ==
-                 0 ||
-             sqlite3_strnicmp(token.start, "integer",
-                              token.end - token.start) == 0) {
+  } else if (vec0_token_is_keyword(&token, "int", isCreate) ||
+             vec0_token_is_keyword(&token, "integer", isCreate)) {
     column_type = SQLITE_INTEGER;
   } else {
     return SQLITE_EMPTY;
@@ -2233,8 +2256,7 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  if (sqlite3_strnicmp(token.start, "partition", token.end - token.start) !=
-      0) {
+  if (!vec0_token_is_keyword(&token, "partition", isCreate)) {
     return SQLITE_EMPTY;
   }
 
@@ -2244,7 +2266,12 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  if (sqlite3_strnicmp(token.start, "key", token.end - token.start) != 0) {
+  if (!vec0_token_is_keyword(&token, "key", isCreate)) {
+    return SQLITE_EMPTY;
+  }
+
+  if (isCreate &&
+      vec0_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_EOF) {
     return SQLITE_EMPTY;
   }
 
@@ -2266,13 +2293,13 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
  * @param out_column_name_length: Length of out_column_name in bytes
  * @param out_column_type: SQLITE_TEXT, SQLITE_INTEGER, SQLITE_FLOAT, or
  * SQLITE_BLOB.
+ * @param isCreate: true when creating the table, which requires whole keywords
+ * and nothing after the definition, see vec0_token_is_keyword().
  * @return int: SQLITE_EMPTY if not an aux column, SQLITE_OK if it is.
  */
-int vec0_parse_auxiliary_column_definition(const char *source,
-                                           int source_length,
-                                           char **out_column_name,
-                                           int *out_column_name_length,
-                                           int *out_column_type) {
+int vec0_parse_auxiliary_column_definition(
+    const char *source, int source_length, char **out_column_name,
+    int *out_column_name_length, int *out_column_type, bool isCreate) {
   struct Vec0Scanner scanner;
   struct Vec0Token token;
   char *column_name;
@@ -2301,22 +2328,22 @@ int vec0_parse_auxiliary_column_definition(const char *source,
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  if (sqlite3_strnicmp(token.start, "text", token.end - token.start) == 0) {
+  if (vec0_token_is_keyword(&token, "text", isCreate)) {
     column_type = SQLITE_TEXT;
-  } else if (sqlite3_strnicmp(token.start, "int", token.end - token.start) ==
-                 0 ||
-             sqlite3_strnicmp(token.start, "integer",
-                              token.end - token.start) == 0) {
+  } else if (vec0_token_is_keyword(&token, "int", isCreate) ||
+             vec0_token_is_keyword(&token, "integer", isCreate)) {
     column_type = SQLITE_INTEGER;
-  } else if (sqlite3_strnicmp(token.start, "float", token.end - token.start) ==
-                 0 ||
-             sqlite3_strnicmp(token.start, "double", token.end - token.start) ==
-                 0) {
+  } else if (vec0_token_is_keyword(&token, "float", isCreate) ||
+             vec0_token_is_keyword(&token, "double", isCreate)) {
     column_type = SQLITE_FLOAT;
-  } else if (sqlite3_strnicmp(token.start, "blob", token.end - token.start) ==
-             0) {
+  } else if (vec0_token_is_keyword(&token, "blob", isCreate)) {
     column_type = SQLITE_BLOB;
   } else {
+    return SQLITE_EMPTY;
+  }
+
+  if (isCreate &&
+      vec0_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_EOF) {
     return SQLITE_EMPTY;
   }
 
@@ -2346,11 +2373,14 @@ typedef enum {
  * Same lifetime as source, points to specific char *
  * @param out_column_name_length: Length of out_column_name in bytes
  * @param out_column_type: one of vec0_metadata_column_kind
+ * @param isCreate: true when creating the table, which requires whole keywords
+ * and nothing after the definition, see vec0_token_is_keyword().
  * @return int: SQLITE_EMPTY if not an metadata column, SQLITE_OK if it is.
  */
 int vec0_parse_metadata_column_definition(
     const char *source, int source_length, char **out_column_name,
-    int *out_column_name_length, vec0_metadata_column_kind *out_column_type) {
+    int *out_column_name_length, vec0_metadata_column_kind *out_column_type,
+    bool isCreate) {
   struct Vec0Scanner scanner;
   struct Vec0Token token;
   char *column_name;
@@ -2374,24 +2404,27 @@ int vec0_parse_metadata_column_definition(
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  char *t = token.start;
-  int n = token.end - token.start;
-  if (sqlite3_strnicmp(t, "boolean", n) == 0 ||
-      sqlite3_strnicmp(t, "bool", n) == 0) {
+  if (vec0_token_is_keyword(&token, "boolean", isCreate) ||
+      vec0_token_is_keyword(&token, "bool", isCreate)) {
     column_type = VEC0_METADATA_COLUMN_KIND_BOOLEAN;
-  } else if (sqlite3_strnicmp(t, "int64", n) == 0 ||
-             sqlite3_strnicmp(t, "integer64", n) == 0 ||
-             sqlite3_strnicmp(t, "integer", n) == 0 ||
-             sqlite3_strnicmp(t, "int", n) == 0) {
+  } else if (vec0_token_is_keyword(&token, "int64", isCreate) ||
+             vec0_token_is_keyword(&token, "integer64", isCreate) ||
+             vec0_token_is_keyword(&token, "integer", isCreate) ||
+             vec0_token_is_keyword(&token, "int", isCreate)) {
     column_type = VEC0_METADATA_COLUMN_KIND_INTEGER;
-  } else if (sqlite3_strnicmp(t, "float", n) == 0 ||
-             sqlite3_strnicmp(t, "double", n) == 0 ||
-             sqlite3_strnicmp(t, "float64", n) == 0 ||
-             sqlite3_strnicmp(t, "f64", n) == 0) {
+  } else if (vec0_token_is_keyword(&token, "float", isCreate) ||
+             vec0_token_is_keyword(&token, "double", isCreate) ||
+             vec0_token_is_keyword(&token, "float64", isCreate) ||
+             vec0_token_is_keyword(&token, "f64", isCreate)) {
     column_type = VEC0_METADATA_COLUMN_KIND_FLOAT;
-  } else if (sqlite3_strnicmp(t, "text", n) == 0) {
+  } else if (vec0_token_is_keyword(&token, "text", isCreate)) {
     column_type = VEC0_METADATA_COLUMN_KIND_TEXT;
   } else {
+    return SQLITE_EMPTY;
+  }
+
+  if (isCreate &&
+      vec0_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_EOF) {
     return SQLITE_EMPTY;
   }
 
@@ -2412,12 +2445,14 @@ int vec0_parse_metadata_column_definition(
  * as source, points to specific char *
  * @param out_column_name_length: Length of out_column_name in bytes
  * @param out_column_type: SQLITE_TEXT or SQLITE_INTEGER.
+ * @param isCreate: true when creating the table, which requires whole keywords
+ * and nothing after the definition, see vec0_token_is_keyword().
  * @return int: SQLITE_EMPTY if not a PK, SQLITE_OK if it is.
  */
 int vec0_parse_primary_key_definition(const char *source, int source_length,
                                       char **out_column_name,
                                       int *out_column_name_length,
-                                      int *out_column_type) {
+                                      int *out_column_type, bool isCreate) {
   struct Vec0Scanner scanner;
   struct Vec0Token token;
   char *column_name;
@@ -2441,12 +2476,10 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  if (sqlite3_strnicmp(token.start, "text", token.end - token.start) == 0) {
+  if (vec0_token_is_keyword(&token, "text", isCreate)) {
     column_type = SQLITE_TEXT;
-  } else if (sqlite3_strnicmp(token.start, "int", token.end - token.start) ==
-                 0 ||
-             sqlite3_strnicmp(token.start, "integer",
-                              token.end - token.start) == 0) {
+  } else if (vec0_token_is_keyword(&token, "int", isCreate) ||
+             vec0_token_is_keyword(&token, "integer", isCreate)) {
     column_type = SQLITE_INTEGER;
   } else {
     return SQLITE_EMPTY;
@@ -2458,7 +2491,7 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  if (sqlite3_strnicmp(token.start, "primary", token.end - token.start) != 0) {
+  if (!vec0_token_is_keyword(&token, "primary", isCreate)) {
     return SQLITE_EMPTY;
   }
 
@@ -2468,7 +2501,12 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
       token.token_type != TOKEN_TYPE_IDENTIFIER) {
     return SQLITE_EMPTY;
   }
-  if (sqlite3_strnicmp(token.start, "key", token.end - token.start) != 0) {
+  if (!vec0_token_is_keyword(&token, "key", isCreate)) {
+    return SQLITE_EMPTY;
+  }
+
+  if (isCreate &&
+      vec0_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_EOF) {
     return SQLITE_EMPTY;
   }
 
@@ -5114,7 +5152,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     // Scenario #2: Constructor argument is a partition key column definition,
     // ie `user_id text partition key`
     rc = vec0_parse_partition_key_definition(argv[i], strlen(argv[i]), &cName,
-                                             &cNameLength, &cType);
+                                             &cNameLength, &cType, isCreate);
     if (rc == SQLITE_OK) {
       if (numPartitionColumns >= VEC0_MAX_PARTITION_COLUMNS) {
         *pzErr =
@@ -5144,7 +5182,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     // Scenario #3: Constructor argument is a primary key column definition, ie
     // `article_id text primary key`
     rc = vec0_parse_primary_key_definition(argv[i], strlen(argv[i]), &cName,
-                                           &cNameLength, &cType);
+                                           &cNameLength, &cType, isCreate);
     if (rc == SQLITE_OK) {
       if (pkColumnName) {
         *pzErr = sqlite3_mprintf(
@@ -5162,8 +5200,8 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
 
     // Scenario #4: Constructor argument is a auxiliary column definition, ie
     // `+contents text`
-    rc = vec0_parse_auxiliary_column_definition(argv[i], strlen(argv[i]),
-                                                &cName, &cNameLength, &cType);
+    rc = vec0_parse_auxiliary_column_definition(
+        argv[i], strlen(argv[i]), &cName, &cNameLength, &cType, isCreate);
     if (rc == SQLITE_OK) {
       if (numAuxiliaryColumns >= VEC0_MAX_AUXILIARY_COLUMNS) {
         *pzErr = sqlite3_mprintf(VEC_CONSTRUCTOR_ERROR
@@ -5191,7 +5229,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
 
     vec0_metadata_column_kind kind;
     rc = vec0_parse_metadata_column_definition(argv[i], strlen(argv[i]), &cName,
-                                               &cNameLength, &kind);
+                                               &cNameLength, &kind, isCreate);
     if (rc == SQLITE_OK) {
       if (numMetadataColumns >= VEC0_MAX_METADATA_COLUMNS) {
         *pzErr = sqlite3_mprintf(VEC_CONSTRUCTOR_ERROR

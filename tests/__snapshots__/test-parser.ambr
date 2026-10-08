@@ -75,17 +75,15 @@
   })
 # ---
 # name: TestPartitionKeyParser.test_missing_key_keyword[missing key keyword]
-  OrderedDict({
-    'sql': 'create virtual table v using vec0(p int partition, a float[4])',
-    'rows': list([
-    ]),
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'p int partition'",
   })
 # ---
 # name: TestPartitionKeyParser.test_missing_partition_keyword[missing partition keyword]
-  OrderedDict({
-    'sql': 'create virtual table v using vec0(p int key, a float[4])',
-    'rows': list([
-    ]),
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'p int key'",
   })
 # ---
 # name: TestPartitionKeyParser.test_missing_type[partition key missing type]
@@ -101,17 +99,15 @@
   })
 # ---
 # name: TestPrimaryKeyParser.test_missing_key_keyword[missing key keyword after primary]
-  OrderedDict({
-    'sql': 'create virtual table v using vec0(id int primary, a float[4])',
-    'rows': list([
-    ]),
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'id int primary'",
   })
 # ---
 # name: TestPrimaryKeyParser.test_missing_primary_keyword[missing primary keyword]
-  OrderedDict({
-    'sql': 'create virtual table v using vec0(id int key, a float[4])',
-    'rows': list([
-    ]),
+  dict({
+    'error': 'OperationalError',
+    'message': "vec0 constructor error: Could not parse 'id int key'",
   })
 # ---
 # name: TestPrimaryKeyParser.test_missing_type[primary key missing type]

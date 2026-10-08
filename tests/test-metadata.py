@@ -10,7 +10,7 @@ def test_constructor_limit(db, snapshot):
             db,
             f"""
         create virtual table v using vec0(
-          {",".join([f"metadata{x} integer" for x in range(17)])}
+          {",".join([f"metadata{x} integer" for x in range(17)])},
           v float[1]
         )
       """,

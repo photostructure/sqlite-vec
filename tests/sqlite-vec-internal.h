@@ -2,6 +2,7 @@
 #define SQLITE_VEC_INTERNAL_H
 
 #include <stdlib.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -74,6 +75,6 @@ int vec0_parse_vector_column(const char *source, int source_length,
 int vec0_parse_partition_key_definition(const char *source, int source_length,
                                         char **out_column_name,
                                         int *out_column_name_length,
-                                        int *out_column_type);
+                                        int *out_column_type, bool isCreate);
 
 #endif /* SQLITE_VEC_INTERNAL_H */

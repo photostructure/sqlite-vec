@@ -392,24 +392,31 @@ void test_vec0_parse_vector_column() {
 // key column definition like "user_id integer partition key". Verifies correct
 // parsing of integer and text partition keys, column name extraction, and
 // rejection of invalid inputs: empty strings, non-partition-key definitions
-// ("primary key"), and misspelled keywords.
+// ("primary key"), and misspelled keywords. Keyword prefixes and tokens after
+// the definition are rejected only when creating the table (isCreate).
 void test_vec0_parse_partition_key_definition() {
   printf("Starting %s...\n", __func__);
   typedef struct {
     char * test;
+    bool isCreate;
     int expected_rc;
     const char *expected_column_name;
     int expected_column_type;
   } TestCase;
 
   TestCase suite[] = {
-    {"user_id integer partition key", SQLITE_OK, "user_id", SQLITE_INTEGER},
-    {"USER_id int partition key", SQLITE_OK, "USER_id", SQLITE_INTEGER},
-    {"category text partition key", SQLITE_OK, "category", SQLITE_TEXT},
+    {"user_id integer partition key", true, SQLITE_OK, "user_id", SQLITE_INTEGER},
+    {"USER_id int partition key", true, SQLITE_OK, "USER_id", SQLITE_INTEGER},
+    {"category text partition key", true, SQLITE_OK, "category", SQLITE_TEXT},
+    {"category te partition ke", false, SQLITE_OK, "category", SQLITE_TEXT},
+    {"category text partition key junk", false, SQLITE_OK, "category", SQLITE_TEXT},
 
-    {"", SQLITE_EMPTY, "", 0},
-    {"document_id text primary key", SQLITE_EMPTY, "", 0},
-    {"document_id text partition keyy", SQLITE_EMPTY, "", 0},
+    {"", true, SQLITE_EMPTY, "", 0},
+    {"document_id text primary key", true, SQLITE_EMPTY, "", 0},
+    {"document_id text partition keyy", true, SQLITE_EMPTY, "", 0},
+    {"category te partition key", true, SQLITE_EMPTY, "", 0},
+    {"category text partition ke", true, SQLITE_EMPTY, "", 0},
+    {"category text partition key junk", true, SQLITE_EMPTY, "", 0},
   };
   for(int i = 0; i < countof(suite); i++) {
     char * out_column_name;
@@ -421,7 +428,8 @@ void test_vec0_parse_partition_key_definition() {
       strlen(suite[i].test),
       &out_column_name,
       &out_column_name_length,
-      &out_column_type
+      &out_column_type,
+      suite[i].isCreate
     );
     assert(rc == suite[i].expected_rc);
 
