@@ -10900,6 +10900,7 @@ static int vec0Rename(sqlite3_vtab *pVTab, const char *zName) {
     zSql = sqlite3_mprintf("ALTER TABLE \"%w\".\"%w\" RENAME TO \"%w\"",
                            p->schemaName, p->shadowVectorChunksNames[i],
                            newShadowVectorChunksName);
+    sqlite3_free(newShadowVectorChunksName);
     rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
     sqlite3_free((void *)zSql);
     if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {

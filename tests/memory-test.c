@@ -119,8 +119,13 @@ static int test_basic_vec0_operations(void) {
                     NULL);
   CHECK_OK(rc, "delete vectors");
 
+  // Rename the table, which renames its shadow tables
+  rc = sqlite3_exec(db, "ALTER TABLE test_vectors RENAME TO renamed_vectors",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "rename table");
+
   // Drop the table
-  rc = sqlite3_exec(db, "DROP TABLE test_vectors", NULL, NULL, NULL);
+  rc = sqlite3_exec(db, "DROP TABLE renamed_vectors", NULL, NULL, NULL);
   CHECK_OK(rc, "drop table");
 
   printf("  PASS: basic vec0 operations\n");
