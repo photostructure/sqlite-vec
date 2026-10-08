@@ -62,6 +62,17 @@ typedef size_t usize;
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 #define min(a, b) (((a) <= (b)) ? (a) : (b))
 
+// VEC0_UNPREDICTABLE(cond) tells clang that cond is hard to predict, so it
+// emits a conditional move instead of a branch. Other compilers get cond as is.
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_unpredictable)
+#define VEC0_UNPREDICTABLE(x) __builtin_unpredictable(x)
+#endif
+#endif
+#ifndef VEC0_UNPREDICTABLE
+#define VEC0_UNPREDICTABLE(x) (x)
+#endif
+
 // Locale-independent strtod implementation for parsing JSON floats
 // Fixes issue #241: strtod is locale-dependent and breaks with non-C locales
 //
@@ -7469,13 +7480,24 @@ int vec0_set_metadata_filter_bitmap(vec0_vtab *p, int metadata_idx,
           &((struct Vec0MetadataIn *)aMetadataIn->z)[metadataInIdx];
       struct Array *aTarget = &(metadataIn->array);
 
-      for (int i = 0; i < size; i++) {
-        for (size_t target_idx = 0; target_idx < aTarget->length;
-             target_idx++) {
-          if (((i64 *)aTarget->z)[target_idx] == array[i]) {
-            bitmap_set(b, i, 1);
-            break;
-          }
+      // The list was sorted when vec0Filter_knn read it. Upstream (vlasky#10)
+      // searches it with bsearch(), whose hard-to-predict branches made short
+      // lists slower than the linear scan it replaced. Here each step picks a
+      // half with a conditional move instead of a branch: gcc -O3 emits one
+      // for the plain conditional, and clang needs VEC0_UNPREDICTABLE.
+      const i64 *targets = (const i64 *)aTarget->z;
+      size_t length = aTarget->length;
+      for (int i = 0; length > 0 && i < size; i++) {
+        const i64 *base = targets;
+        size_t n = length;
+        while (n > 1) {
+          size_t half = n / 2;
+          base =
+              VEC0_UNPREDICTABLE(base[half] <= array[i]) ? base + half : base;
+          n -= half;
+        }
+        if (*base == array[i]) {
+          bitmap_set(b, i, 1);
         }
       }
       break;
@@ -8440,6 +8462,7 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
         array_cleanup(&item.array);
         goto cleanup;
       }
+      qsort(item.array.z, item.array.length, item.array.element_size, _cmp);
 
       break;
     }
