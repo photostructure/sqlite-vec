@@ -190,7 +190,27 @@ The third character of the block is the constraint operator. It will be one of
 `enum vec0_metadata_operator`, as only a subset of operators are supported on
 metadata column KNN filters.
 
-The foruth character of the block is a `_` filler.
+The fourth character of the block is the collation a text constraint compares
+with, one of `enum vec0_metadata_collation`:
+
+| Collation | Value |
+| --------- | ----- |
+| `BINARY`  | `'_'` |
+| `NOCASE`  | `'n'` |
+| `RTRIM`   | `'r'` |
+
+Only `=`, `IS`, `<`, `<=`, `>`, `>=`, and `IN` constraints on a text column
+carry the collation that `sqlite3_vtab_collation()` reports for them; `xBestIndex`
+rejects any other collation on them. SQLite also calls `xBestIndex` with each
+branch of an `OR` offered as a constraint, which `vec0` cannot tell from a
+top-level one, so the error fires for such a constraint inside an `OR` too,
+although SQLite may evaluate that `OR` itself.
+
+Every other constraint carries `'_'`: SQLite compares an INTEGER or REAL without
+a collation, `LIKE` and `GLOB` have their own case rules, and SQLite reports
+`BINARY` for a text `!=` or `IS NOT` whatever collation the query names. `vec0`
+compares those two bytewise and leaves `omit` unset, so SQLite re-checks each
+row with the query's collation.
 
 #### `VEC0_IDXSTR_KIND_KNN_DISTANCE_CONSTRAINT` (`'*'`)
 

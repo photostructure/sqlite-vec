@@ -5877,6 +5877,14 @@ typedef enum {
   VEC0_METADATA_OPERATOR_ISNOTNULL = 'm',
 } vec0_metadata_operator;
 
+// The collation a KNN query's text metadata filter compares with. If any values
+// are updated, please update the ARCHITECTURE.md docs accordingly!
+typedef enum {
+  VEC0_METADATA_COLLATION_BINARY = '_',
+  VEC0_METADATA_COLLATION_NOCASE = 'n',
+  VEC0_METADATA_COLLATION_RTRIM = 'r',
+} vec0_metadata_collation;
+
 typedef enum {
 
   VEC0_DISTANCE_CONSTRAINT_GT = 'a',
@@ -6252,12 +6260,54 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
         }
       }
 
+      // SQLite compares an INTEGER or REAL without a collation, so only a text
+      // comparison carries one
+      char collation = VEC0_METADATA_COLLATION_BINARY;
+      int omit = 1;
+      if (p->metadata_columns[metadata_idx].kind ==
+          VEC0_METADATA_COLUMN_KIND_TEXT) {
+        switch (value) {
+        case VEC0_METADATA_OPERATOR_EQ:
+        case VEC0_METADATA_OPERATOR_IN:
+        case VEC0_METADATA_OPERATOR_GT:
+        case VEC0_METADATA_OPERATOR_LE:
+        case VEC0_METADATA_OPERATOR_LT:
+        case VEC0_METADATA_OPERATOR_GE:
+        case VEC0_METADATA_OPERATOR_IS: {
+          const char *zCollation = sqlite3_vtab_collation(pIdxInfo, i);
+          if (sqlite3_stricmp(zCollation, "NOCASE") == 0) {
+            collation = VEC0_METADATA_COLLATION_NOCASE;
+          } else if (sqlite3_stricmp(zCollation, "RTRIM") == 0) {
+            collation = VEC0_METADATA_COLLATION_RTRIM;
+          } else if (sqlite3_stricmp(zCollation, "BINARY") != 0) {
+            rc = SQLITE_ERROR;
+            vtab_set_error(pVTab,
+                           "Collation \"%s\" is not supported on the \"%.*s\" "
+                           "metadata column in a vec0 KNN query. Only BINARY, "
+                           "NOCASE, and RTRIM are supported.",
+                           zCollation,
+                           p->metadata_columns[metadata_idx].name_length,
+                           p->metadata_columns[metadata_idx].name);
+            goto done;
+          }
+          break;
+        }
+        case VEC0_METADATA_OPERATOR_NE:
+        case VEC0_METADATA_OPERATOR_ISNOT: {
+          // SQLite reports BINARY for these whatever collation the query
+          // names, so vec0 compares bytewise and SQLite re-checks each row
+          omit = 0;
+          break;
+        }
+        }
+      }
+
       pIdxInfo->aConstraintUsage[i].argvIndex = argvIndex++;
-      pIdxInfo->aConstraintUsage[i].omit = 1;
+      pIdxInfo->aConstraintUsage[i].omit = omit;
       sqlite3_str_appendchar(idxStr, 1, VEC0_IDXSTR_KIND_METADATA_CONSTRAINT);
       sqlite3_str_appendchar(idxStr, 1, 'A' + metadata_idx);
       sqlite3_str_appendchar(idxStr, 1, value);
-      sqlite3_str_appendchar(idxStr, 1, '_');
+      sqlite3_str_appendchar(idxStr, 1, collation);
     }
 
     // find any distance column constraints
@@ -6827,9 +6877,82 @@ static int vec0_text_binary_cmp(const char *a, int na, const char *b, int nb) {
   return (na > nb) - (na < nb);
 }
 
+// Compares text the way SQLite's BINARY, NOCASE, or RTRIM collation does.
+// NOCASE folds ASCII letters only, and sqlite3_strnicmp() stops at a NUL both
+// values have at the same offset. RTRIM ignores trailing spaces, but no other
+// trailing whitespace.
+static int vec0_text_cmp(vec0_metadata_collation collation, const char *a,
+                         int na, const char *b, int nb) {
+  switch (collation) {
+  case VEC0_METADATA_COLLATION_NOCASE: {
+    int cmp = sqlite3_strnicmp(a, b, min(na, nb));
+    if (cmp != 0) {
+      return cmp;
+    }
+    return (na > nb) - (na < nb);
+  }
+  case VEC0_METADATA_COLLATION_RTRIM:
+    while (na > 0 && a[na - 1] == ' ')
+      na--;
+    while (nb > 0 && b[nb - 1] == ' ')
+      nb--;
+    break;
+  case VEC0_METADATA_COLLATION_BINARY:
+    break;
+  }
+  return vec0_text_binary_cmp(a, na, b, nb);
+}
+
+// Compares the first n bytes of two values that have the same length, the way
+// BINARY or NOCASE does. Values equal under either have the same length, so
+// the EQ and IN filters compare only values of the target's length.
+static int vec0_text_same_length_cmp(vec0_metadata_collation collation,
+                                     const char *a, const char *b, int n) {
+  if (collation == VEC0_METADATA_COLLATION_NOCASE) {
+    return sqlite3_strnicmp(a, b, n);
+  }
+  return memcmp(a, b, n);
+}
+
+// Sets bit i of b when op holds between the whole text value of row i and any
+// of the targets, compared with the collation. A value longer than the view's
+// 12 bytes is read from the long-text table.
+static int vec0_metadata_filter_text_whole(
+    vec0_vtab *p, sqlite3_stmt **stmt, int metadata_idx, const void *buffer,
+    const i64 *rowids, int size, vec0_metadata_operator op,
+    vec0_metadata_collation collation,
+    const struct Vec0MetadataInTextEntry *targets, size_t nTargets, u8 *b) {
+  for (int i = 0; i < size; i++) {
+    u8 *view = &((u8 *)buffer)[i * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH];
+    int n = ((int *)view)[0];
+    char *s = (char *)&view[4];
+    if (n > VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
+      int nFull;
+      int rc = vec0_get_metadata_text_long_value(p, stmt, metadata_idx,
+                                                 rowids[i], &nFull, &s);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
+      if (n != nFull) {
+        return SQLITE_ERROR;
+      }
+    }
+    for (size_t j = 0; j < nTargets; j++) {
+      int cmp =
+          vec0_text_cmp(collation, s, n, targets[j].zString, targets[j].n);
+      if (vec0_metadata_operator_holds(op, cmp)) {
+        bitmap_set(b, i, 1);
+        break;
+      }
+    }
+  }
+  return SQLITE_OK;
+}
+
 int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
                               const void *buffer, int size,
-                              vec0_metadata_operator op, u8 *b,
+                              vec0_metadata_operator op,
+                              vec0_metadata_collation collation, u8 *b,
                               int metadata_idx, int chunk_rowid,
                               struct Array *aMetadataIn, int argv_idx) {
   int rc;
@@ -6838,6 +6961,7 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
   sqlite3_blob *rowidsBlob;
   const char *sTarget = (const char *)sqlite3_value_text(value);
   int nTarget = sqlite3_value_bytes(value);
+  struct Vec0MetadataInTextEntry target = {nTarget, (char *)sTarget};
 
   // TODO(perf): only text metadata news the rowids BLOB. Make it so that
   // rowids BLOB is re-used when multiple fitlers on text columns,
@@ -6879,6 +7003,17 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
     int nFull;
     u8 *view;
   case VEC0_METADATA_OPERATOR_EQ: {
+    if (collation == VEC0_METADATA_COLLATION_RTRIM) {
+      // RTRIM ignores trailing spaces, so values of different lengths can be
+      // equal and the length check below does not apply
+      rc = vec0_metadata_filter_text_whole(p, &stmt, metadata_idx, buffer,
+                                           rowids, size, op, collation, &target,
+                                           1, b);
+      if (rc != SQLITE_OK) {
+        goto done;
+      }
+      break;
+    }
     for (int i = 0; i < size; i++) {
       view = &((u8 *)buffer)[i * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH];
       nPrefix = ((int *)view)[0];
@@ -6889,8 +7024,9 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         bitmap_set(b, i, 0);
         continue;
       }
-      int cmpPrefix = memcmp(sPrefix, sTarget,
-                             min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
+      int cmpPrefix = vec0_text_same_length_cmp(
+          collation, sPrefix, sTarget,
+          min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
 
       // for short strings, use the prefix comparison direclty
       if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
@@ -6912,7 +7048,9 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         rc = SQLITE_ERROR;
         goto done;
       }
-      bitmap_set(b, i, memcmp(sFull, sTarget, nFull) == 0);
+      bitmap_set(b, i,
+                 vec0_text_same_length_cmp(collation, sFull, sTarget, nFull) ==
+                     0);
     }
     break;
   }
@@ -6959,29 +7097,11 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
   case VEC0_METADATA_OPERATOR_GE:
   case VEC0_METADATA_OPERATOR_LE:
   case VEC0_METADATA_OPERATOR_LT: {
-    for (int i = 0; i < size; i++) {
-      view = &((u8 *)buffer)[i * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH];
-      nPrefix = ((int *)view)[0];
-      sPrefix = (char *)&view[4];
-
-      int cmp;
-      // the view holds the whole value when it fits
-      if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        cmp = vec0_text_binary_cmp(sPrefix, nPrefix, sTarget, nTarget);
-      } else {
-        // TODO(perf): may not need to compare full text in some cases
-        rc = vec0_get_metadata_text_long_value(p, &stmt, metadata_idx,
-                                               rowids[i], &nFull, &sFull);
-        if (rc != SQLITE_OK) {
-          goto done;
-        }
-        if (nPrefix != nFull) {
-          rc = SQLITE_ERROR;
-          goto done;
-        }
-        cmp = vec0_text_binary_cmp(sFull, nFull, sTarget, nTarget);
-      }
-      bitmap_set(b, i, vec0_metadata_operator_holds(op, cmp));
+    // TODO(perf): may not need to compare full text in some cases
+    rc = vec0_metadata_filter_text_whole(p, &stmt, metadata_idx, buffer, rowids,
+                                         size, op, collation, &target, 1, b);
+    if (rc != SQLITE_OK) {
+      goto done;
     }
     break;
   }
@@ -7005,6 +7125,18 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         &((struct Vec0MetadataIn *)aMetadataIn->z)[metadataInIdx];
     struct Array *aTarget = &(metadataIn->array);
 
+    if (collation == VEC0_METADATA_COLLATION_RTRIM) {
+      // RTRIM ignores trailing spaces, so values of different lengths can be
+      // equal and the length check below does not apply
+      rc = vec0_metadata_filter_text_whole(
+          p, &stmt, metadata_idx, buffer, rowids, size,
+          VEC0_METADATA_OPERATOR_EQ, collation, aTarget->z, aTarget->length, b);
+      if (rc != SQLITE_OK) {
+        goto done;
+      }
+      break;
+    }
+
     int nPrefix;
     char *sPrefix;
     char *sFull;
@@ -7020,9 +7152,9 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
         if (entry->n != nPrefix) {
           continue;
         }
-        int cmpPrefix =
-            memcmp(sPrefix, entry->zString,
-                   min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
+        int cmpPrefix = vec0_text_same_length_cmp(
+            collation, sPrefix, entry->zString,
+            min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH));
         if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
           if (cmpPrefix == 0) {
             bitmap_set(b, i, 1);
@@ -7043,7 +7175,8 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
           rc = SQLITE_ERROR;
           goto done;
         }
-        if (memcmp(sFull, entry->zString, nFull) == 0) {
+        if (vec0_text_same_length_cmp(collation, sFull, entry->zString,
+                                      nFull) == 0) {
           bitmap_set(b, i, 1);
           break;
         }
@@ -7285,6 +7418,7 @@ done:
  */
 int vec0_set_metadata_filter_bitmap(vec0_vtab *p, int metadata_idx,
                                     vec0_metadata_operator op,
+                                    vec0_metadata_collation collation,
                                     sqlite3_value *value, sqlite3_blob *blob,
                                     i64 chunk_rowid, u8 *b, int size,
                                     struct Array *aMetadataIn, int argv_idx) {
@@ -7612,8 +7746,9 @@ int vec0_set_metadata_filter_bitmap(vec0_vtab *p, int metadata_idx,
     break;
   }
   case VEC0_METADATA_COLUMN_KIND_TEXT: {
-    rc = vec0_metadata_filter_text(p, value, buffer, size, op, b, metadata_idx,
-                                   chunk_rowid, aMetadataIn, argv_idx);
+    rc = vec0_metadata_filter_text(p, value, buffer, size, op, collation, b,
+                                   metadata_idx, chunk_rowid, aMetadataIn,
+                                   argv_idx);
     if (rc != SQLITE_OK) {
       goto done;
     }
@@ -7844,6 +7979,7 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
         }
         int metadata_idx = idxStr[idx + 1] - 'A';
         int operator = idxStr[idx + 2];
+        int collation = idxStr[idx + 3];
 
         if (!metadataBlobs[metadata_idx]) {
           rc = sqlite3_blob_open(
@@ -7857,8 +7993,9 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
 
         bitmap_clear(bmMetadata, p->chunk_size);
         rc = vec0_set_metadata_filter_bitmap(
-            p, metadata_idx, operator, argv[i], metadataBlobs[metadata_idx],
-            chunk_id, bmMetadata, p->chunk_size, aMetadataIn, i);
+            p, metadata_idx, operator, collation, argv[i],
+            metadataBlobs[metadata_idx], chunk_id, bmMetadata, p->chunk_size,
+            aMetadataIn, i);
         if (rc != SQLITE_OK) {
           vtab_set_error(&p->base, "Could not filter metadata fields");
           if (rc != SQLITE_OK) {

@@ -188,6 +188,32 @@ TEXT_FILTER_VALUES = [
     "a" * 14 + "\0c",
     "\u00e9t\u00e9",
     "zzz",
+    # NOCASE folds ASCII letters only, and RTRIM ignores trailing spaces only
+    "ABC",
+    "abc ",
+    "ABC  ",
+    "abc\t",
+    " ",
+    "a" * 11 + " ",
+    "X" * 12,
+    "x" * 12 + " ",  # stored in the long-text table, RTRIM equals "x" * 12
+    "X" * 13,
+    "x" * 13 + "   ",
+    "A" * 20,
+    "a" * 20 + " ",
+    "a" * 12 + "B",
+    "A" * 12 + "b",
+    "AB\0D",  # NOCASE stops at a NUL, so this equals "ab\0c"
+    "A" * 14 + "\0d",
+    # long values with a NUL inside the 12-byte view: each pair is equal under
+    # NOCASE, which stops at the NUL, but differs after it
+    "ab\0" + "x" * 12,
+    "AB\0" + "y" * 12,
+    "abcdefghijk\0" + "xyz",  # the NUL is the view's last byte
+    "ABCDEFGHIJK\0" + "XYW",
+    "ab\0" + "x" * 13,
+    "\u00c9t\u00c9",
+    "\u00e9T\u00e9",
 ]
 
 
@@ -247,6 +273,187 @@ def test_text_like_glob_matches_plain_table(db):
         ("t glob ?", "[ab]*\0x"),
     ]:
         _assert_knn_filter_matches_plain(db, condition, [pattern])
+
+
+def test_text_collate_matches_plain_table(db):
+    _create_text_filter_tables(db)
+    targets = TEXT_FILTER_VALUES + ["abc  ", "Abc", "X" * 12 + "  ", "A" * 13]
+    for collation in ["nocase", "rtrim"]:
+        for target in targets:
+            for op in ["=", "<", "<=", ">", ">=", "is"]:
+                _assert_knn_filter_matches_plain(
+                    db, f"t {op} ? collate {collation}", [target]
+                )
+                _assert_knn_filter_matches_plain(
+                    db, f"t collate {collation} {op} ?", [target]
+                )
+            # IN compares with the left operand's collation, so the second form
+            # compares bytewise. SQLite rewrites the third, a one-value IN, as
+            # `=`, which takes the collation from either side.
+            for condition in [
+                f"t collate {collation} in (?, 'nonsense')",
+                f"t in (? collate {collation}, 'nonsense')",
+                f"t in (? collate {collation})",
+            ]:
+                _assert_knn_filter_matches_plain(db, condition, [target])
+
+
+def test_text_collate_not_equal_rechecked(db):
+    # SQLite reports BINARY for a text `!=` or IS NOT constraint whatever
+    # collation it names, so vec0 compares bytewise and SQLite re-checks each
+    # row vec0 returns. A row equal under the collation but not bytewise takes
+    # one of the k rows and is then dropped, so a query returns the nearest of
+    # the plain table's rows in distance order, possibly fewer than k of them.
+    # That is why this asserts a prefix of the plain table's rows, not equality.
+    values = ["ABC", "abc ", "xyz", "abc", "Abc  ", "abd", "ABC\t", "aBc"]
+    db.execute("create virtual table v using vec0(e float[1], t text, chunk_size=8)")
+    db.execute("create table plain(t, d)")
+    for rowid, value in enumerate(values, 1):
+        db.execute(
+            "insert into v(rowid, e, t) values (?, ?, ?)", [rowid, f"[{rowid}]", value]
+        )
+        db.execute(
+            "insert into plain(rowid, t, d) values (?, ?, ?)", [rowid, value, rowid]
+        )
+    conditions = []
+    for op in ["!=", "is not"]:
+        conditions.append((f"t {op} ?", ["k", "limit"]))
+        for collation in ["nocase", "rtrim"]:
+            conditions.append((f"t {op} ? collate {collation}", ["k", "limit"]))
+            # never offered to vec0, so SQLite passes it no LIMIT
+            conditions.append((f"t collate {collation} {op} ?", ["k"]))
+    for condition, forms in conditions:
+        expected = [
+            row[0]
+            for row in db.execute(
+                f"select rowid from plain where {condition} order by d", ["abc"]
+            )
+        ]
+        for k in range(1, len(values) + 1):
+            for form in forms:
+                sql = f"select rowid from v where e match '[0]' and {condition}"
+                sql += " and k = ?" if form == "k" else " limit ?"
+                actual = [row[0] for row in db.execute(sql, ["abc", k])]
+                assert actual == expected[: len(actual)], (sql, k)
+                if "collate" not in condition:
+                    # a bytewise re-check drops no row
+                    assert len(actual) == min(k, len(expected)), (sql, k)
+
+
+def test_text_collate_unsupported(db):
+    # vec0 compares text with BINARY, NOCASE, and RTRIM only, so another
+    # collation on a KNN text metadata constraint is an error.
+    db.create_collation(
+        "reverse", lambda a, b: (a[::-1] > b[::-1]) - (a[::-1] < b[::-1])
+    )
+    db.execute(
+        "create virtual table v using vec0(e float[1], t text, n integer, f float, b boolean, chunk_size=8)"
+    )
+    db.execute("create table plain(t, n, f, b)")
+    rows = [(1, "abc", 1, 1.5, 1), (2, "cba", 2, -2.0, 0), (3, "1", 3, 1.0, 1)]
+    for row in rows:
+        db.execute(
+            "insert into v(rowid, e, t, n, f, b) values (?, '[0]', ?, ?, ?, ?)", row
+        )
+        db.execute("insert into plain(rowid, t, n, f, b) values (?, ?, ?, ?, ?)", row)
+    for condition in [
+        "t = ? collate reverse",
+        "t collate reverse = ?",
+        "t is ? collate reverse",
+        "t > ? collate reverse",
+        "t collate reverse <= ?",
+        "t collate reverse in (?, 'nonsense')",
+    ]:
+        with pytest.raises(
+            sqlite3.OperationalError, match="Only BINARY, NOCASE, and RTRIM"
+        ):
+            db.execute(
+                f"select rowid from v where e match '[0]' and k = 10 and {condition}",
+                ["abc"],
+            )
+    # SQLite offers vec0 each branch of an OR as if it stood alone, so the
+    # error also fires inside an OR, which SQLite used to evaluate itself
+    for condition in [
+        "(t = ? collate reverse or n = 2)",
+        "(n = 2 or t collate reverse > ?)",
+    ]:
+        with pytest.raises(
+            sqlite3.OperationalError, match="Only BINARY, NOCASE, and RTRIM"
+        ):
+            db.execute(
+                f"select rowid from v where e match '[0]' and k = 10 and {condition}",
+                ["abc"],
+            )
+
+    # SQLite never compares an integer or real with a collation, and these
+    # text constraints compare without one or are re-checked by SQLite
+    def knn(condition, parameters):
+        return sorted(
+            row[0]
+            for row in db.execute(
+                f"select rowid from v where e match '[0]' and k = 10 and {condition}",
+                parameters,
+            )
+        )
+
+    def plain(condition, parameters):
+        return sorted(
+            row[0]
+            for row in db.execute(
+                f"select rowid from plain where {condition}", parameters
+            )
+        )
+
+    for condition in [
+        "n = ? collate reverse",
+        "n collate reverse > ?",
+        "n collate reverse in (?, 2)",
+        "f <= ? collate reverse",
+        "b = ? collate reverse",
+        "b collate reverse is not ?",
+        "t != ? collate reverse",
+        "t is not ? collate reverse",
+        "t like ? collate reverse",
+        "t glob ? collate reverse",
+    ]:
+        for value in [1, 1.5, "1", "abc", "a%", "a*"]:
+            assert knn(condition, [value]) == plain(condition, [value]), (
+                condition,
+                value,
+            )
+    condition = "t collate reverse is not null"
+    assert knn(condition, []) == plain(condition, []) == [1, 2, 3]
+
+
+def test_text_like_prefix_with_limit(db):
+    # For a LIKE pattern with a literal prefix, SQLite also offers vec0
+    # `t collate nocase >= ?` and `t collate nocase < ?` range terms (unless
+    # case_sensitive_like is on). vec0 must apply them, or SQLite does not pass
+    # it the LIMIT.
+    _create_text_filter_tables(db)
+    patterns = ["abc%", "ABC%", "x%", "X" * 12 + "%", "x" * 13 + "%", "a" * 12 + "b%"]
+    for pattern in patterns:
+        expected = [
+            row[0]
+            for row in db.execute(
+                "select rowid from plain where t like ? order by rowid", [pattern]
+            )
+        ]
+        _assert_knn_filter_matches_plain(db, "t like ?", [pattern])
+        for condition, parameters in [
+            ("t like ?", [pattern]),
+            (f"t like '{pattern}'", []),
+        ]:
+            for limit in [2, 100]:
+                actual = [
+                    row[0]
+                    for row in db.execute(
+                        f"select rowid from v where e match '[0]' and {condition} limit {limit}",
+                        parameters,
+                    )
+                ]
+                assert len(actual) == min(limit, len(expected)), (condition, limit)
+                assert set(actual) <= set(expected), (condition, limit)
 
 
 def test_types(db, snapshot):
