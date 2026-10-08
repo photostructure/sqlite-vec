@@ -99,6 +99,15 @@ def test_shadow_vector_chunks(db):
     )
 
 
+@pytest.mark.parametrize("name", ["order", "my vecs"])
+def test_optimize_on_table_name_that_needs_quoting(db, name):
+    db.execute(f'create virtual table "{name}" using vec0(a float[1], chunk_size=8)')
+    db.execute(f"insert into \"{name}\"(rowid, a) values (1, '[1]')")
+    db.execute(f'delete from "{name}" where rowid = 1')
+    db.execute(f'insert into "{name}"("{name}") values (\'optimize\')')
+    assert db.execute(f'select count(*) from "{name}_chunks"').fetchone()[0] == 0
+
+
 def test_info(db, snapshot):
     db.execute("create virtual table v using vec0(a float[1])")
     assert exec(db, "select key, typeof(value) from v_info order by 1") == snapshot()

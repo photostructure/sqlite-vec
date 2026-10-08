@@ -5257,7 +5257,8 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     }
   }
   sqlite3_str_appendall(createStr, " distance hidden, k hidden, ");
-  sqlite3_str_appendf(createStr, "%s hidden, mmr_lambda hidden) ", tableName);
+  sqlite3_str_appendf(createStr, "\"%w\" hidden, mmr_lambda hidden) ",
+                      tableName);
   if (pkColumnName) {
     sqlite3_str_appendall(createStr, "without rowid ");
   }
