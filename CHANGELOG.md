@@ -24,6 +24,7 @@
 - `UPDATE` of a `vec0` table's integer key, its `rowid` column or a column such as `id integer primary key`, now fails with `UPDATEs on vec0 primary key values are not allowed.` when the new value is a different key, as for a text primary key. So does `SET oid = ...` or `SET _rowid_ = ...` on a table without a primary key column. Such an `UPDATE` used to succeed, apply its other changes, and leave the row at its old key. A value that an ordinary table's `INTEGER PRIMARY KEY` converts to the same integer, such as `'1'` or `1.0` for 1, still leaves the key unchanged; a value it rejects with `datatype mismatch`, such as `'abc'`, `1.5`, or NULL, now fails with the `vec0` message. vlasky/sqlite-vec has the same code.
 - Inserting a non-integer rowid into a `vec0` table now fails with `Only integers are allowed for primary key values`; the message used to say "are allows".
 - Creating a `vec0` table with two primary key columns now fails with `More than one primary key definition was provided, vec0 only supports a single primary key column`; the message used to say "suports".
+- Inserting a value of the wrong type into a `vec0` partition key column now fails with `Partition key type mismatch: ...`; the message used to say "Parition".
 - A KNN query with a metadata filter that fails after the search has run, for example when a progress handler interrupts it between rows, now reports that error's own message, such as `interrupted`. It used to report `Could not open metadata blob`, which the filter set even when the blob opened.
 
 ### Removed

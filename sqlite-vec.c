@@ -9726,7 +9726,7 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
         (new_value_type != p->paritition_columns[partition_key_idx].type)) {
       // IMP: V11454_28292
       vtab_set_error(pVTab,
-                     "Parition key type mismatch: The partition key column "
+                     "Partition key type mismatch: The partition key column "
                      "%.*s has type %s, but %s was provided.",
                      p->paritition_columns[partition_key_idx].name_length,
                      p->paritition_columns[partition_key_idx].name,
