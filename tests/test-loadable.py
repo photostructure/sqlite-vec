@@ -1909,6 +1909,17 @@ def test_vec0_text_pk():
     with _raises("UPDATEs on vec0 primary key values are not allowed."):
         db.execute("update t set t_id = 'xxx' where t_id = 't_2'")
 
+    # an id that differs only after an embedded NUL is still a different id
+    db.execute("insert into t(t_id, aaa, bbb) values (?, '[0.4]', '[-0.4]')", ["t\0a"])
+    with _raises("UPDATEs on vec0 primary key values are not allowed."):
+        db.execute("update t set t_id = ? where t_id = ?", ["t\0b", "t\0a"])
+    # and a value of another type never equals a text id
+    db.execute("insert into t(t_id, aaa, bbb) values ('', '[0.5]', '[-0.5]')")
+    db.execute("insert into t(t_id, aaa, bbb) values ('5', '[0.6]', '[-0.6]')")
+    for old_id, new_id in [("", None), ("5", b"5"), ("5", 5)]:
+        with _raises("UPDATEs on vec0 primary key values are not allowed."):
+            db.execute("update t set t_id = ? where t_id = ?", [new_id, old_id])
+
 
 def test_vec0_best_index():
     db = connect(EXT_PATH)

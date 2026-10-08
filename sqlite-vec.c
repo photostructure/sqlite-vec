@@ -10432,11 +10432,15 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
 
   i64 rowid = 0;
   if (p->pkIsText) {
+    // a stored text key never equals a value of another type; check the type
+    // before sqlite3_value_text() converts the value
+    int newIsText = sqlite3_value_type(argv[1]) == SQLITE_TEXT;
     const char *a = (const char *)sqlite3_value_text(argv[0]);
     const char *b = (const char *)sqlite3_value_text(argv[1]);
     // IMP: V08886_25725
-    if ((sqlite3_value_bytes(argv[0]) != sqlite3_value_bytes(argv[1])) ||
-        strncmp(a, b, sqlite3_value_bytes(argv[0])) != 0) {
+    if (!newIsText ||
+        (sqlite3_value_bytes(argv[0]) != sqlite3_value_bytes(argv[1])) ||
+        memcmp(a, b, sqlite3_value_bytes(argv[0])) != 0) {
       vtab_set_error(pVTab,
                      "UPDATEs on vec0 primary key values are not allowed.");
       return SQLITE_ERROR;
