@@ -8135,7 +8135,7 @@ static int vec0_mmr_rerank(vec0_vtab *p, int vectorColumnIdx,
   f32 *relevance = NULL;
   i64 *out_rowids = NULL;
   f32 *out_distances = NULL;
-  void **out_vectors = NULL;
+  f32 *max_sim = NULL;
   u8 *selected = NULL;
 
   // 2. Load vectors from shadow tables
@@ -8164,16 +8164,21 @@ static int vec0_mmr_rerank(vec0_vtab *p, int vectorColumnIdx,
     relevance[i] = 1.0f - (topk_distances[i] / max_dist);
   }
 
-  // 4. Greedy MMR selection
+  // 4. Greedy MMR selection. max_sim[i] is candidate i's highest similarity
+  // to the results selected so far, raised against each new selection
+  // alone, so a step measures each remaining candidate once.
   out_rowids = sqlite3_malloc64(k_target * sizeof(i64));
   out_distances = sqlite3_malloc64(k_target * sizeof(f32));
-  out_vectors = sqlite3_malloc64(k_target * sizeof(void *));
+  max_sim = sqlite3_malloc64(k_used * sizeof(f32));
   selected = sqlite3_malloc64(k_used);
-  if (!out_rowids || !out_distances || !out_vectors || !selected) {
+  if (!out_rowids || !out_distances || !max_sim || !selected) {
     rc = SQLITE_NOMEM;
     goto cleanup;
   }
   memset(selected, 0, k_used);
+  for (i64 i = 0; i < k_used; i++) {
+    max_sim[i] = 0.0f;
+  }
 
   i64 n_selected = 0;
   for (i64 step = 0; step < k_target && step < k_used; step++) {
@@ -8184,17 +8189,8 @@ static int vec0_mmr_rerank(vec0_vtab *p, int vectorColumnIdx,
       if (selected[i])
         continue;
 
-      // max similarity to already-selected results
-      f32 max_sim = 0.0f;
-      for (i64 j = 0; j < step; j++) {
-        f32 d =
-            vec0_compute_distance(vector_column, vectors[i], out_vectors[j]);
-        f32 sim = 1.0f - (d / max_dist);
-        if (sim > max_sim)
-          max_sim = sim;
-      }
-
-      f32 mmr_score = mmr_lambda * relevance[i] - (1.0f - mmr_lambda) * max_sim;
+      f32 mmr_score =
+          mmr_lambda * relevance[i] - (1.0f - mmr_lambda) * max_sim[i];
       if (mmr_score > best_mmr) {
         best_mmr = mmr_score;
         best_idx = i;
@@ -8206,8 +8202,24 @@ static int vec0_mmr_rerank(vec0_vtab *p, int vectorColumnIdx,
     selected[best_idx] = 1;
     out_rowids[step] = topk_rowids[best_idx];
     out_distances[step] = topk_distances[best_idx];
-    out_vectors[step] = vectors[best_idx];
     n_selected++;
+
+    // Departs from upstream (vlasky#11), which also raises max_sim after the
+    // last selection. Nothing reads those values, and computing them made
+    // k = 1 and k = 2 compute more distances than the nested loop this
+    // replaced (4 instead of 0, and 17 instead of 9).
+    if (n_selected == k_target)
+      break;
+
+    for (i64 i = 0; i < k_used; i++) {
+      if (selected[i])
+        continue;
+      f32 d =
+          vec0_compute_distance(vector_column, vectors[i], vectors[best_idx]);
+      f32 sim = 1.0f - (d / max_dist);
+      if (sim > max_sim[i])
+        max_sim[i] = sim;
+    }
   }
 
   // 5. Copy results back to input arrays
@@ -8227,7 +8239,7 @@ cleanup:
   sqlite3_free(relevance);
   sqlite3_free(out_rowids);
   sqlite3_free(out_distances);
-  sqlite3_free(out_vectors);
+  sqlite3_free(max_sim);
   sqlite3_free(selected);
   return rc;
 }
