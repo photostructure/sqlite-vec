@@ -863,6 +863,18 @@ static int test_error_path_leaks(void) {
     goto cleanup;
   }
 
+  // CREATE rejects a column named like the table while building the
+  // declaration.
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE emb USING vec0("
+                    "  emb float[4], +title text, tag text"
+                    ")",
+                    NULL, NULL, NULL);
+  if (rc == SQLITE_OK) {
+    fprintf(stderr, "FAILED: column named like its table was accepted\n");
+    goto cleanup;
+  }
+
   // Updating an auxiliary column builds a SQL string per call.
   rc = sqlite3_exec(db,
                     "CREATE VIRTUAL TABLE docs USING vec0("

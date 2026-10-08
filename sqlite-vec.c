@@ -3708,6 +3708,11 @@ struct vec0_vtab {
   // Will change the schema of the _rowids table, and insert/query logic.
   int pkIsText;
 
+  // True if the table declares the hidden command column named after the
+  // table, which runs `INSERT INTO t(t) VALUES ('optimize')`. False when
+  // another column has the table's name; see vec0_init().
+  int hasCommandColumn;
+
   // number of defined vector columns.
   int numVectorColumns;
 
@@ -3915,7 +3920,7 @@ int vec0_column_k_idx(vec0_vtab *p) {
 
 /**
  * @brief Returns the index of the table_name hidden column for the given vec0
- * table.
+ * table. ONLY call if p->hasCommandColumn.
  *
  * @param p vec0 table
  * @return int
@@ -3926,11 +3931,12 @@ int vec0_column_table_name_idx(vec0_vtab *p) {
 }
 
 /**
- * Returns the column index for the hidden "mmr_lambda" column.
+ * Returns the column index for the hidden "mmr_lambda" column, which follows
+ * the table_name column when the table has one.
  */
 int vec0_column_mmr_lambda_idx(vec0_vtab *p) {
   return VEC0_COLUMN_USERN_START + (vec0_num_defined_user_columns(p) - 1) +
-         VEC0_COLUMN_OFFSET_MMR_LAMBDA;
+         VEC0_COLUMN_OFFSET_MMR_LAMBDA - (p->hasCommandColumn ? 0 : 1);
 }
 
 /**
@@ -5214,51 +5220,84 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
   const char *schemaName = argv[1];
   const char *tableName = argv[2];
 
+  // The hidden command column has the table's name, so a table with another
+  // column of that name gets none: the duplicate would fail to declare. CREATE
+  // rejects such tables; older releases allowed them, and ALTER TABLE RENAME
+  // can still make one.
+  int tableNameLength = (int)strlen(tableName);
+  int hasCommandColumn = 1;
+
   sqlite3_str *createStr = sqlite3_str_new(NULL);
   sqlite3_str_appendall(createStr, "CREATE TABLE x(");
   if (pkColumnName) {
     sqlite3_str_appendf(createStr, "\"%.*w\" primary key, ", pkColumnNameLength,
                         pkColumnName);
+    if (pkColumnNameLength == tableNameLength &&
+        sqlite3_strnicmp(pkColumnName, tableName, tableNameLength) == 0) {
+      hasCommandColumn = 0;
+    }
   } else {
     sqlite3_str_appendall(createStr, "rowid, ");
+    if (sqlite3_stricmp(tableName, "rowid") == 0) {
+      hasCommandColumn = 0;
+    }
   }
   for (int i = 0; i < numVectorColumns + numPartitionColumns +
                           numAuxiliaryColumns + numMetadataColumns;
        i++) {
+    const char *name = NULL;
+    int name_length = 0;
     switch (pNew->user_column_kinds[i]) {
     case SQLITE_VEC0_USER_COLUMN_KIND_VECTOR: {
       int vector_idx = pNew->user_column_idxs[i];
-      sqlite3_str_appendf(createStr, "\"%.*w\", ",
-                          pNew->vector_columns[vector_idx].name_length,
-                          pNew->vector_columns[vector_idx].name);
+      name = pNew->vector_columns[vector_idx].name;
+      name_length = pNew->vector_columns[vector_idx].name_length;
       break;
     }
     case SQLITE_VEC0_USER_COLUMN_KIND_PARTITION: {
       int partition_idx = pNew->user_column_idxs[i];
-      sqlite3_str_appendf(createStr, "\"%.*w\", ",
-                          pNew->paritition_columns[partition_idx].name_length,
-                          pNew->paritition_columns[partition_idx].name);
+      name = pNew->paritition_columns[partition_idx].name;
+      name_length = pNew->paritition_columns[partition_idx].name_length;
       break;
     }
     case SQLITE_VEC0_USER_COLUMN_KIND_AUXILIARY: {
       int auxiliary_idx = pNew->user_column_idxs[i];
-      sqlite3_str_appendf(createStr, "\"%.*w\", ",
-                          pNew->auxiliary_columns[auxiliary_idx].name_length,
-                          pNew->auxiliary_columns[auxiliary_idx].name);
+      name = pNew->auxiliary_columns[auxiliary_idx].name;
+      name_length = pNew->auxiliary_columns[auxiliary_idx].name_length;
       break;
     }
     case SQLITE_VEC0_USER_COLUMN_KIND_METADATA: {
       int metadata_idx = pNew->user_column_idxs[i];
-      sqlite3_str_appendf(createStr, "\"%.*w\", ",
-                          pNew->metadata_columns[metadata_idx].name_length,
-                          pNew->metadata_columns[metadata_idx].name);
+      name = pNew->metadata_columns[metadata_idx].name;
+      name_length = pNew->metadata_columns[metadata_idx].name_length;
       break;
     }
     }
+    sqlite3_str_appendf(createStr, "\"%.*w\", ", name_length, name);
+    if (name_length == tableNameLength &&
+        sqlite3_strnicmp(name, tableName, tableNameLength) == 0) {
+      hasCommandColumn = 0;
+    }
+  }
+  if (sqlite3_stricmp(tableName, "distance") == 0 ||
+      sqlite3_stricmp(tableName, "k") == 0 ||
+      sqlite3_stricmp(tableName, "mmr_lambda") == 0) {
+    hasCommandColumn = 0;
+  }
+  if (isCreate && !hasCommandColumn) {
+    sqlite3_free(sqlite3_str_finish(createStr));
+    *pzErr = sqlite3_mprintf(
+        VEC_CONSTRUCTOR_ERROR
+        "column name '%s' conflicts with table name (reserved for command "
+        "column)",
+        tableName);
+    goto error;
   }
   sqlite3_str_appendall(createStr, " distance hidden, k hidden, ");
-  sqlite3_str_appendf(createStr, "\"%w\" hidden, mmr_lambda hidden) ",
-                      tableName);
+  if (hasCommandColumn) {
+    sqlite3_str_appendf(createStr, "\"%w\" hidden, ", tableName);
+  }
+  sqlite3_str_appendall(createStr, "mmr_lambda hidden) ");
   if (pkColumnName) {
     sqlite3_str_appendall(createStr, "without rowid ");
   }
@@ -5277,6 +5316,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
 
   pNew->db = db;
   pNew->pkIsText = pkColumnType == SQLITE_TEXT;
+  pNew->hasCommandColumn = hasCommandColumn;
   pNew->schemaName = sqlite3_mprintf("%s", schemaName);
   if (!pNew->schemaName) {
     goto error;
@@ -10716,6 +10756,7 @@ static int vec0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
                       sqlite_int64 *pRowid) {
   // Special insert
   if (argc > 1 && sqlite3_value_type(argv[0]) == SQLITE_NULL &&
+      ((vec0_vtab *)pVTab)->hasCommandColumn &&
       sqlite3_value_type(
           argv[2 + vec0_column_table_name_idx((vec0_vtab *)pVTab)]) !=
           SQLITE_NULL) {

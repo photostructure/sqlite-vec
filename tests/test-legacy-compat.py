@@ -96,6 +96,51 @@ def test_legacy_fullscan(legacy_db):
     assert [r["rowid"] for r in rows] == [1, 2, 3, 4, 5]
 
 
+def test_legacy_name_conflict_table(legacy_db):
+    # v0.1.6 allowed CREATE VIRTUAL TABLE emb USING vec0(emb float[4]). The
+    # hidden command column named after the table would duplicate "emb".
+    count = legacy_db.execute("SELECT count(*) FROM emb").fetchone()[0]
+    assert count == 10
+
+    rows = legacy_db.execute(
+        "SELECT rowid, distance FROM emb WHERE emb MATCH ? AND k = 3",
+        [_f32([1.0, 0.0, 0.0, 0.0])],
+    ).fetchall()
+    assert [(r["rowid"], r["distance"]) for r in rows] == [(1, 0.0), (2, 1.0), (3, 2.0)]
+
+    row = legacy_db.execute("SELECT emb FROM emb WHERE rowid = 4").fetchone()
+    assert row["emb"] == _f32([4.0, 0.0, 0.0, 0.0])
+
+    # mmr_lambda is the hidden column after k when there is no command column.
+    rows = legacy_db.execute(
+        "SELECT rowid FROM emb WHERE emb MATCH ? AND k = 3 AND mmr_lambda = 1.0",
+        [_f32([1.0, 0.0, 0.0, 0.0])],
+    ).fetchall()
+    assert [r["rowid"] for r in rows] == [1, 2, 3]
+
+
+def test_legacy_name_conflict_insert_delete(legacy_db):
+    legacy_db.execute(
+        "INSERT INTO emb(rowid, emb) VALUES (100, ?)",
+        [_f32([100.0, 0.0, 0.0, 0.0])],
+    )
+    assert legacy_db.execute("SELECT count(*) FROM emb").fetchone()[0] == 11
+    rows = legacy_db.execute(
+        "SELECT rowid FROM emb WHERE emb MATCH ? AND k = 1",
+        [_f32([100.0, 0.0, 0.0, 0.0])],
+    ).fetchall()
+    assert [r["rowid"] for r in rows] == [100]
+
+    legacy_db.execute("DELETE FROM emb WHERE rowid = 5")
+    assert legacy_db.execute("SELECT count(*) FROM emb").fetchone()[0] == 10
+
+
+def test_legacy_name_conflict_has_no_optimize(legacy_db):
+    # "emb" names the vector column, so 'optimize' is parsed as a vector.
+    with pytest.raises(sqlite3.OperationalError, match="JSON array"):
+        legacy_db.execute("INSERT INTO emb(emb) VALUES ('optimize')")
+
+
 def test_legacy_insert_after_chunk_deleted(legacy_db):
     # v0.1.6 declares _vector_chunks00 with "rowid PRIMARY KEY", which is not
     # an alias for _rowid_. Once its only chunk is empty, optimize deletes it,

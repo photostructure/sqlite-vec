@@ -293,6 +293,19 @@ VACUUM;
 `VACUUM` should not corrupt vec tables; a checkpoint first is recommended when
 using WAL so the rewrite starts from a clean state.
 
+`optimize` runs through a hidden column named after the table, so a `vec0`
+table cannot have another column with its name. `CREATE` rejects tables such as
+`CREATE VIRTUAL TABLE emb USING vec0(emb float[4])`, and tables named
+`distance`, `k`, `mmr_lambda`, or (without a primary key column) `rowid`, which
+are names of columns `vec0` always declares. Older releases allowed these
+names. Such tables still open, but without `optimize`; rename the
+table to get it back:
+
+```sql
+ALTER TABLE emb RENAME TO emb_vectors;
+INSERT INTO emb_vectors(emb_vectors) VALUES('optimize');
+```
+
 ## Sponsors
 
 > [!NOTE]

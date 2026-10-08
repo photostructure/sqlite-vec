@@ -108,6 +108,65 @@ def test_optimize_on_table_name_that_needs_quoting(db, name):
     assert db.execute(f'select count(*) from "{name}_chunks"').fetchone()[0] == 0
 
 
+@pytest.mark.parametrize(
+    "name, columns",
+    [
+        ("emb", "emb float[1]"),
+        ("Emb", "emb float[1]"),
+        ("id", "id text primary key, a float[1]"),
+        ("p", "a float[1], p text partition key"),
+        ("aux", "a float[1], +aux text"),
+        ("meta", "a float[1], meta text"),
+        ("rowid", "a float[1]"),
+        ("distance", "a float[1]"),
+        ("k", "a float[1]"),
+        ("mmr_lambda", "a float[1]"),
+    ],
+)
+def test_create_rejects_column_named_like_table(db, name, columns):
+    # The hidden command column has the table's name.
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=rf"^vec0 constructor error: column name '{name}' conflicts with table name \(reserved for command column\)$",
+    ):
+        db.execute(f'create virtual table "{name}" using vec0({columns})')
+    assert db.execute("select count(*) from sqlite_master").fetchone()[0] == 0
+
+
+def test_create_accepts_rowid_table_name_with_primary_key(db):
+    db.execute(
+        'create virtual table "rowid" using vec0(id integer primary key, a float[1])'
+    )
+    db.execute("""insert into "rowid"(id, a) values (1, '[1]')""")
+    db.execute("""insert into "rowid"("rowid") values ('optimize')""")
+    assert [tuple(r) for r in db.execute('select id from "rowid"')] == [(1,)]
+
+
+@pytest.mark.parametrize("name", ["emb", "rowid", "distance", "k", "mmr_lambda"])
+def test_rename_to_column_name_drops_command_column(db, name):
+    # ALTER TABLE RENAME reconnects the table without calling xCreate, as a
+    # database from before v0.2.0-alpha does, so the table opens without a
+    # command column. Renaming it again restores the command column.
+    db.execute("create virtual table t using vec0(emb float[1], chunk_size=8)")
+    db.execute("insert into t(rowid, emb) values (1, '[1]'), (2, '[2]'), (3, '[3]')")
+    db.execute(f'alter table t rename to "{name}"')
+
+    db.execute(f"""insert into "{name}"(rowid, emb) values (4, '[4]')""")
+    db.execute(f'delete from "{name}" where rowid = 1')
+    knn = f"""select rowid, distance from "{name}" where emb match '[2]' and k = 3"""
+    expected = [(2, 0.0), (3, 1.0), (4, 2.0)]
+    assert [tuple(r) for r in db.execute(knn)] == expected
+    assert [tuple(r) for r in db.execute(knn + " and mmr_lambda = 1.0")] == expected
+    assert db.execute(f'select emb from "{name}" where rowid = 4').fetchone()[0] == (
+        b"\x00\x00\x80\x40"
+    )
+
+    db.execute(f'alter table "{name}" rename to t2')
+    db.execute("delete from t2")
+    db.execute("insert into t2(t2) values ('optimize')")
+    assert db.execute("select count(*) from t2_chunks").fetchone()[0] == 0
+
+
 def test_info(db, snapshot):
     db.execute("create virtual table v using vec0(a float[1])")
     assert exec(db, "select key, typeof(value) from v_info order by 1") == snapshot()
