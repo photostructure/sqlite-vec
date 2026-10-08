@@ -2433,7 +2433,7 @@ def test_vec0_constructor():
         db.execute("create virtual table v using vec0(aaa float[-1])")
 
     with _raises(
-        "vec0 constructor error: More than one primary key definition was provided, vec0 only suports a single primary key column",
+        "vec0 constructor error: More than one primary key definition was provided, vec0 only supports a single primary key column",
         sqlite3.DatabaseError,
     ):
         db.execute(

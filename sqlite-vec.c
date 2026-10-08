@@ -5188,8 +5188,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
         *pzErr = sqlite3_mprintf(
             VEC_CONSTRUCTOR_ERROR
             "More than one primary key definition was provided, vec0 only "
-            "suports a single primary key column",
-            argv[i]);
+            "supports a single primary key column");
         goto error;
       }
       pkColumnName = cName;
