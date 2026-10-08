@@ -169,6 +169,58 @@ def test_long_text_knn(db, snapshot):
             ) == snapshot(name=f"{op_name}-{test}")
 
 
+# Text values for comparing KNN text filters with an ordinary table, whose
+# BINARY collation compares bytes with memcmp() and sorts a prefix first.
+TEXT_FILTER_VALUES = [
+    "",
+    "a",
+    "abc",
+    "x" * 12,  # the longest value kept whole in the 12-byte prefix
+    "x" * 13,  # the shortest value stored in the long-text table
+    "a" * 11,
+    "a" * 13,
+    "a" * 12,
+    "a" * 20,  # a long value that is a prefix of the next one
+    "a" * 21,
+    "ab\0c",
+    "ab\0d",
+    "a" * 14 + "\0b",
+    "a" * 14 + "\0c",
+    "\u00e9t\u00e9",
+    "zzz",
+]
+
+
+def _create_text_filter_tables(db):
+    db.execute("create virtual table v using vec0(e float[1], t text, chunk_size=8)")
+    # untyped, like vec0's columns, so SQLite compares values with it as is
+    db.execute("create table plain(t)")
+    for rowid, value in enumerate(TEXT_FILTER_VALUES, 1):
+        db.execute("insert into v(rowid, e, t) values (?, '[0]', ?)", [rowid, value])
+        db.execute("insert into plain(rowid, t) values (?, ?)", [rowid, value])
+
+
+def _assert_knn_filter_matches_plain(db, condition, parameters):
+    expected = db.execute(
+        f"select rowid from plain where {condition} order by rowid", parameters
+    ).fetchall()
+    actual = db.execute(
+        f"select rowid from v where e match '[0]' and k = 100 and {condition}",
+        parameters,
+    ).fetchall()
+    assert sorted(r[0] for r in actual) == [r[0] for r in expected], (
+        condition,
+        parameters,
+    )
+
+
+def test_text_range_matches_plain_table(db):
+    _create_text_filter_tables(db)
+    for op in ["<", "<=", ">", ">="]:
+        for target in TEXT_FILTER_VALUES:
+            _assert_knn_filter_matches_plain(db, f"t {op} ?", [target])
+
+
 def test_types(db, snapshot):
     db.execute(
         "create virtual table v using vec0(vector float[1], b boolean, n int, f float, t text, chunk_size=8)"

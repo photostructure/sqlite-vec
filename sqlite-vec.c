@@ -6779,6 +6779,16 @@ static int vec0_metadata_constant_result(vec0_metadata_column_kind kind,
   return -1;
 }
 
+// Compares text the way SQLite's BINARY collation does: memcmp() over the
+// shorter length, then the shorter value sorts first.
+static int vec0_text_binary_cmp(const char *a, int na, const char *b, int nb) {
+  int cmp = memcmp(a, b, min(na, nb));
+  if (cmp != 0) {
+    return cmp;
+  }
+  return (na > nb) - (na < nb);
+}
+
 int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
                               const void *buffer, int size,
                               vec0_metadata_operator op, u8 *b,
@@ -6907,135 +6917,33 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
     }
     break;
   }
-  case VEC0_METADATA_OPERATOR_GT: {
-    for (int i = 0; i < size; i++) {
-      view = &((u8 *)buffer)[i * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH];
-      nPrefix = ((int *)view)[0];
-      sPrefix = (char *)&view[4];
-      int cmpPrefix = strncmp(
-          sPrefix, sTarget,
-          min(min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH), nTarget));
-
-      if (nPrefix < VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        // if prefix match, check which is longer
-        if (cmpPrefix == 0) {
-          bitmap_set(b, i, nPrefix > nTarget);
-        } else {
-          bitmap_set(b, i, cmpPrefix > 0);
-        }
-        continue;
-      }
-      // TODO(perf): may not need to compare full text in some cases
-
-      rc = vec0_get_metadata_text_long_value(p, &stmt, metadata_idx, rowids[i],
-                                             &nFull, &sFull);
-      if (rc != SQLITE_OK) {
-        goto done;
-      }
-      if (nPrefix != nFull) {
-        rc = SQLITE_ERROR;
-        goto done;
-      }
-      bitmap_set(b, i, strncmp(sFull, sTarget, nFull) > 0);
-    }
-    break;
-  }
-  case VEC0_METADATA_OPERATOR_GE: {
-    for (int i = 0; i < size; i++) {
-      view = &((u8 *)buffer)[i * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH];
-      nPrefix = ((int *)view)[0];
-      sPrefix = (char *)&view[4];
-      int cmpPrefix = strncmp(
-          sPrefix, sTarget,
-          min(min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH), nTarget));
-
-      if (nPrefix < VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        // if prefix match, check which is longer
-        if (cmpPrefix == 0) {
-          bitmap_set(b, i, nPrefix >= nTarget);
-        } else {
-          bitmap_set(b, i, cmpPrefix >= 0);
-        }
-        continue;
-      }
-      // TODO(perf): may not need to compare full text in some cases
-
-      rc = vec0_get_metadata_text_long_value(p, &stmt, metadata_idx, rowids[i],
-                                             &nFull, &sFull);
-      if (rc != SQLITE_OK) {
-        goto done;
-      }
-      if (nPrefix != nFull) {
-        rc = SQLITE_ERROR;
-        goto done;
-      }
-      bitmap_set(b, i, strncmp(sFull, sTarget, nFull) >= 0);
-    }
-    break;
-  }
-  case VEC0_METADATA_OPERATOR_LE: {
-    for (int i = 0; i < size; i++) {
-      view = &((u8 *)buffer)[i * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH];
-      nPrefix = ((int *)view)[0];
-      sPrefix = (char *)&view[4];
-      int cmpPrefix = strncmp(
-          sPrefix, sTarget,
-          min(min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH), nTarget));
-
-      if (nPrefix < VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        // if prefix match, check which is longer
-        if (cmpPrefix == 0) {
-          bitmap_set(b, i, nPrefix <= nTarget);
-        } else {
-          bitmap_set(b, i, cmpPrefix <= 0);
-        }
-        continue;
-      }
-      // TODO(perf): may not need to compare full text in some cases
-
-      rc = vec0_get_metadata_text_long_value(p, &stmt, metadata_idx, rowids[i],
-                                             &nFull, &sFull);
-      if (rc != SQLITE_OK) {
-        goto done;
-      }
-      if (nPrefix != nFull) {
-        rc = SQLITE_ERROR;
-        goto done;
-      }
-      bitmap_set(b, i, strncmp(sFull, sTarget, nFull) <= 0);
-    }
-    break;
-  }
+  case VEC0_METADATA_OPERATOR_GT:
+  case VEC0_METADATA_OPERATOR_GE:
+  case VEC0_METADATA_OPERATOR_LE:
   case VEC0_METADATA_OPERATOR_LT: {
     for (int i = 0; i < size; i++) {
       view = &((u8 *)buffer)[i * VEC0_METADATA_TEXT_VIEW_BUFFER_LENGTH];
       nPrefix = ((int *)view)[0];
       sPrefix = (char *)&view[4];
-      int cmpPrefix = strncmp(
-          sPrefix, sTarget,
-          min(min(nPrefix, VEC0_METADATA_TEXT_VIEW_DATA_LENGTH), nTarget));
 
-      if (nPrefix < VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
-        // if prefix match, check which is longer
-        if (cmpPrefix == 0) {
-          bitmap_set(b, i, nPrefix < nTarget);
-        } else {
-          bitmap_set(b, i, cmpPrefix < 0);
+      int cmp;
+      // the view holds the whole value when it fits
+      if (nPrefix <= VEC0_METADATA_TEXT_VIEW_DATA_LENGTH) {
+        cmp = vec0_text_binary_cmp(sPrefix, nPrefix, sTarget, nTarget);
+      } else {
+        // TODO(perf): may not need to compare full text in some cases
+        rc = vec0_get_metadata_text_long_value(p, &stmt, metadata_idx,
+                                               rowids[i], &nFull, &sFull);
+        if (rc != SQLITE_OK) {
+          goto done;
         }
-        continue;
+        if (nPrefix != nFull) {
+          rc = SQLITE_ERROR;
+          goto done;
+        }
+        cmp = vec0_text_binary_cmp(sFull, nFull, sTarget, nTarget);
       }
-      // TODO(perf): may not need to compare full text in some cases
-
-      rc = vec0_get_metadata_text_long_value(p, &stmt, metadata_idx, rowids[i],
-                                             &nFull, &sFull);
-      if (rc != SQLITE_OK) {
-        goto done;
-      }
-      if (nPrefix != nFull) {
-        rc = SQLITE_ERROR;
-        goto done;
-      }
-      bitmap_set(b, i, strncmp(sFull, sTarget, nFull) < 0);
+      bitmap_set(b, i, vec0_metadata_operator_holds(op, cmp));
     }
     break;
   }
