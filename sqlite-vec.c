@@ -7016,6 +7016,8 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
   }
 
   case VEC0_METADATA_OPERATOR_LIKE: {
+    // SQLite reads a pattern only up to a NUL
+    nTarget = (int)strlen(sTarget);
     int is_prefix_only = vec0_is_prefix_only_like_pattern(sTarget, nTarget);
 
     if (is_prefix_only) {
@@ -7108,6 +7110,8 @@ int vec0_metadata_filter_text(vec0_vtab *p, sqlite3_value *value,
   }
 
   case VEC0_METADATA_OPERATOR_GLOB: {
+    // SQLite reads a pattern only up to a NUL
+    nTarget = (int)strlen(sTarget);
     int is_prefix_only = vec0_is_prefix_only_glob_pattern(sTarget, nTarget);
 
     if (is_prefix_only) {

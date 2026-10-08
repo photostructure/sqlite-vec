@@ -240,6 +240,13 @@ def test_text_like_glob_matches_plain_table(db):
     # "[" starts a character class, so these are not literal prefixes
     for pattern in ["[ab]*", "[a]*", "a[b]*"]:
         _assert_knn_filter_matches_plain(db, "t glob ?", [pattern])
+    # SQLite reads a pattern only up to a NUL
+    for condition, pattern in [
+        ("t like ?", "a\0x%"),
+        ("t glob ?", "a\0x*"),
+        ("t glob ?", "[ab]*\0x"),
+    ]:
+        _assert_knn_filter_matches_plain(db, condition, [pattern])
 
 
 def test_types(db, snapshot):
