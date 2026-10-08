@@ -6,6 +6,7 @@ import sqlite3
 import unittest
 from random import random
 import struct
+import sys
 import inspect
 import pytest
 import json
@@ -1877,6 +1878,13 @@ def to_npy(arr):
     return buf.read()
 
 
+def _npy_with_shape(shape, data):
+    # a float32 npy array whose header declares `shape`, which np.save() can't
+    # write when the shape doesn't match the data
+    header = b"{'descr': '<f4', 'fortran_order': False, 'shape': %s, }\n" % shape
+    return b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header)) + header + data
+
+
 def test_vec_npy_each():
     db = connect(EXT_PATH, extra_entrypoint="sqlite3_vec_numpy_init")
     vec_npy_each = lambda *args: execute_all(
@@ -2034,11 +2042,26 @@ def test_vec_npy_each_errors():
 
     # shape numbers saturate instead of wrapping: 2**64 + 1 would wrap to 1 and
     # match the 4 data bytes
-    header = b"{'descr': '<f4', 'fortran_order': False, 'shape': (18446744073709551617,), }\n"
-    with _raises("numpy array error: Expected a data size of"):
+    with _raises("numpy array error: shape is too large"):
+        vec_npy_each(_npy_with_shape(b"(18446744073709551617,)", _f32([1.0])))
+
+    # the data size is computed without wrapping: 2 * (2**30 + 1) * 4 used to
+    # truncate to 8 and match, and reading row 1 crashed
+    with _raises("numpy array error: Expected a data size of 8589934600, found 8"):
+        vec_npy_each(_npy_with_shape(b"(2, 1073741825)", _f32([1.0, 2.0])))
+    with _raises("numpy array error: shape is too large"):
         vec_npy_each(
-            b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header)) + header + _f32([1.0])
+            _npy_with_shape(
+                b"(99999999999999999999999, 99999999999999999999999)", _f32([1.0])
+            )
         )
+    # 2**62 float32 values are the smallest 1-D shape whose size overflows
+    with _raises("numpy array error: shape is too large"):
+        vec_npy_each(_npy_with_shape(b"(4611686018427387904,)", b""))
+    with _raises(
+        "numpy array error: Expected a data size of 18446744073709551612, found 0"
+    ):
+        vec_npy_each(_npy_with_shape(b"(4611686018427387903,)", b""))
 
     # with _raises("XXX"):
     #    vec_npy_each(b"\x93NUMPY\x01\x00v\x00{'descr': '<f4', 'fortran_order': False, 'shape': (2, 4), }                                                          \n\xcd\xcc\x8c?\xcd\xcc\x0c@33S@\xcd\xcc\x8c@ff\x1eA\xcd\xcc\x0cAff\xf6@33\xd3@")
@@ -2085,6 +2108,13 @@ def test_vec_npy_each_errors_files():
             b"\x93NUMPY\x01\x00v\x00{'descr': '<f4', 'fortran_order': False, 'shape': (2, 4), }                                                          \n\xcd\xcc\x8c?\xcd\xcc\x0c@33S@\xcd\xcc\x8c@ff\x1eA\xcd\xcc\x0cAff\xf6@33\xd3"
         )
 
+    # 2000 * (2**30 + 1) * 4 used to truncate to 8000 and match, and fread()
+    # wrote the data past a read buffer whose size was truncated too
+    with _raises(
+        "numpy array file error: Expected a data size of 8589934600000, found 8000"
+    ):
+        vec_npy_each(_npy_with_shape(b"(2000, 1073741825)", _f32([0.0] * 2000)))
+
     # a 1024-row read buffer of 1048577 floats per row is 4 GiB. Its size used
     # to be truncated to an int, 4096, and fread() wrote the 4 MiB row past it.
     # The buffer now holds only as many rows as the file has.
@@ -2112,6 +2142,29 @@ def test_vec_npy_each_errors_files():
     assert vec_npy_each(to_npy(np.array([], dtype=np.float32))) == []
     x1025 = vec_npy_each(to_npy(np.array([[0.1, 0.2, 0.3]] * 1025, dtype=np.float32)))
     assert len(x1025) == 1025
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="long is 32 bits on Windows, so ftell() can't report a 2 GiB file size",
+)
+def test_vec_npy_file_over_2gib():
+    # the data size used to be truncated to an i32, so a file with more than
+    # 2 GiB of data failed with "numpy array file header length is invalid"
+    db = connect(EXT_PATH, extra_entrypoint="sqlite3_vec_numpy_init")
+    rows, dimensions = 524289, 1024
+    with tempfile.NamedTemporaryFile(delete_on_close=False) as f:
+        np.lib.format.write_array_header_1_0(
+            f, {"descr": "<f4", "fortran_order": False, "shape": (rows, dimensions)}
+        )
+        # sparse, so the 2 GiB of zeros take no disk space
+        f.truncate(f.tell() + rows * dimensions * 4)
+        f.close()
+        assert execute_all(
+            db,
+            "select count(*) as n, max(length(vector)) as size from vec_npy_each(vec_npy_file(?))",
+            [f.name],
+        ) == [{"n": rows, "size": dimensions * 4}]
 
     # np.array([[.1, .2, 3]] * 99, dtype=np.float32).shape
 

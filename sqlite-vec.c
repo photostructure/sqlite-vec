@@ -3190,6 +3190,17 @@ struct vec_npy_each_cursor {
 
 static unsigned char NPY_MAGIC[6] = {0x93, 'N', 'U', 'M', 'P', 'Y'};
 
+// Sets *out to the byte size of numElements float32 vectors of numDimensions
+// elements each. Returns 0 if that size does not fit in a size_t.
+static int npy_data_size(size_t numElements, size_t numDimensions,
+                         size_t *out) {
+  if (numElements && numDimensions > SIZE_MAX / sizeof(f32) / numElements) {
+    return 0;
+  }
+  *out = numElements * numDimensions * sizeof(f32);
+  return 1;
+}
+
 #ifndef SQLITE_VEC_OMIT_FS
 int parse_npy_file(sqlite3_vtab *pVTab, FILE *file, vec_npy_each_cursor *pCur) {
   int n;
@@ -3218,11 +3229,11 @@ int parse_npy_file(sqlite3_vtab *pVTab, FILE *file, vec_npy_each_cursor *pCur) {
 
   size_t totalHeaderLength = sizeof(NPY_MAGIC) + sizeof(major) + sizeof(minor) +
                              sizeof(headerLength) + headerLength;
-  i32 dataSize = fileSize - totalHeaderLength;
-  if (dataSize < 0) {
+  if (fileSize < 0 || (size_t)fileSize < totalHeaderLength) {
     vtab_set_error(pVTab, "numpy array file header length is invalid");
     return SQLITE_ERROR;
   }
+  size_t dataSize = (size_t)fileSize - totalHeaderLength;
 
   unsigned char *headerX = sqlite3_malloc(headerLength);
   if (headerLength && !headerX) {
@@ -3248,12 +3259,16 @@ int parse_npy_file(sqlite3_vtab *pVTab, FILE *file, vec_npy_each_cursor *pCur) {
     return rc;
   }
 
-  i32 expectedDataSize =
-      numElements * vector_byte_size(element_type, numDimensions);
+  size_t expectedDataSize;
+  if (!npy_data_size(numElements, numDimensions, &expectedDataSize)) {
+    vtab_set_error(pVTab, "numpy array file error: shape is too large");
+    return SQLITE_ERROR;
+  }
   if (expectedDataSize != dataSize) {
     vtab_set_error(
-        pVTab, "numpy array file error: Expected a data size of %d, found %d",
-        expectedDataSize, dataSize);
+        pVTab,
+        "numpy array file error: Expected a data size of %llu, found %llu",
+        (sqlite3_uint64)expectedDataSize, (sqlite3_uint64)dataSize);
     return SQLITE_ERROR;
   }
 
@@ -3320,12 +3335,15 @@ int parse_npy_buffer(sqlite3_vtab *pVTab, const unsigned char *buffer,
     return rc;
   }
 
-  i32 expectedDataSize =
-      (*numElements * vector_byte_size(*element_type, *numDimensions));
-  if (expectedDataSize != dataSize) {
+  size_t expectedDataSize;
+  if (!npy_data_size(*numElements, *numDimensions, &expectedDataSize)) {
+    vtab_set_error(pVTab, "numpy array error: shape is too large");
+    return SQLITE_ERROR;
+  }
+  if (expectedDataSize != (size_t)dataSize) {
     vtab_set_error(pVTab,
-                   "numpy array error: Expected a data size of %d, found %d",
-                   expectedDataSize, dataSize);
+                   "numpy array error: Expected a data size of %llu, found %d",
+                   (sqlite3_uint64)expectedDataSize, dataSize);
     return SQLITE_ERROR;
   }
 
