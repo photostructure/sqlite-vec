@@ -2085,6 +2085,12 @@ def test_vec_npy_each_errors_files():
             b"\x93NUMPY\x01\x00v\x00{'descr': '<f4', 'fortran_order': False, 'shape': (2, 4), }                                                          \n\xcd\xcc\x8c?\xcd\xcc\x0c@33S@\xcd\xcc\x8c@ff\x1eA\xcd\xcc\x0cAff\xf6@33\xd3"
         )
 
+    # 1024 rows of 1048577 floats need a 4 GiB read buffer, more than SQLite
+    # allocates. Its size used to be truncated to an int, 4096, and fread()
+    # wrote the 4 MiB row past it.
+    with pytest.raises(MemoryError):
+        vec_npy_each(to_npy(np.ones((1, 1048577), dtype=np.float32)))
+
     assert vec_npy_each(to_npy(np.array([1.1, 2.2, 3.3], dtype=np.float32))) == [
         {
             "rowid": 0,

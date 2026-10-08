@@ -3260,7 +3260,7 @@ int parse_npy_file(sqlite3_vtab *pVTab, FILE *file, vec_npy_each_cursor *pCur) {
   pCur->maxChunks = 1024;
   pCur->chunksBufferSize =
       (vector_byte_size(element_type, numDimensions)) * pCur->maxChunks;
-  pCur->chunksBuffer = sqlite3_malloc(pCur->chunksBufferSize);
+  pCur->chunksBuffer = sqlite3_malloc64(pCur->chunksBufferSize);
   if (pCur->chunksBufferSize && !pCur->chunksBuffer) {
     return SQLITE_NOMEM;
   }
