@@ -122,7 +122,7 @@ Rules that follow from this:
 The `vec0` idxStr is a string composed of single "header" character and 0 or
 more "blocks" of 4 characters each.
 
-The "header" charcter denotes the type of query plan, as determined by the
+The "header" character denotes the type of query plan, as determined by the
 `enum vec0_query_plan` values. The current possible values are:
 
 | Name                       | Value | Description                                                            |
@@ -178,11 +178,11 @@ The remaining 3 characters of the block are `_` fillers.
 
 #### `VEC0_IDXSTR_KIND_METADATA_CONSTRAINT` (`'&'`)
 
-`argv[i]` is the value of the `WHERE` constraint for a metdata column in a KNN
+`argv[i]` is the value of the `WHERE` constraint for a metadata column in a KNN
 query.
 
 The second character of the block denotes which metadata column the constraint
-belongs to, using `A` to denote the first metadata column column, `B` for the
+belongs to, using `A` to denote the first metadata column, `B` for the
 second, etc. It is encoded with `'A' + metadata_idx` and can be decoded with
 `c - 'A'`.
 
