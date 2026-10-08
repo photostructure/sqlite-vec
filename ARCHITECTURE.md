@@ -119,7 +119,7 @@ Rules that follow from this:
 
 ### idxStr
 
-The `vec0` idxStr is a string composed of single "header" character and 0 or
+The `vec0` idxStr is a string composed of a single "header" character and 0 or
 more "blocks" of 4 characters each.
 
 The "header" character denotes the type of query plan, as determined by the
@@ -133,8 +133,8 @@ The "header" character denotes the type of query plan, as determined by the
 
 Each 4-character "block" is associated with a corresponding value in `argv[]`.
 For example, the 1st block at byte offset `1-4` (inclusive) is the 1st block and
-is associated with `argv[1]`. The 2nd block at byte offset `5-8` (inclusive) is
-associated with `argv[2]` and so on. Each block describes what kind of value or
+is associated with `argv[0]`. The 2nd block at byte offset `5-8` (inclusive) is
+associated with `argv[1]` and so on. Each block describes what kind of value or
 filter the given `argv[i]` value is.
 
 #### `VEC0_IDXSTR_KIND_KNN_MATCH` (`'{'`)
