@@ -5725,15 +5725,15 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
   // Free up any sqlite3_stmt, otherwise DROPs on those tables will fail
   vec0_free_resources(p);
 
-  // TODO(test) later: can't evidence-of here, bc always gives "SQL logic error"
-  // instead of provided error
+  // SQLite never reports a message set here (OP_VDestroy ignores zErrMsg), and
+  // on a table that survives a failed xDestroy the message could leak, so set
+  // none.
   zSql = sqlite3_mprintf("DROP TABLE " VEC0_SHADOW_CHUNKS_NAME, p->schemaName,
                          p->tableName);
   rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
   sqlite3_free((void *)zSql);
   if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
     rc = SQLITE_ERROR;
-    vtab_set_error(pVtab, "could not drop chunks shadow table");
     goto done;
   }
   sqlite3_finalize(stmt);
@@ -5744,7 +5744,6 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
   sqlite3_free((void *)zSql);
   if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
     rc = SQLITE_ERROR;
-    vtab_set_error(pVtab, "could not drop info shadow table");
     goto done;
   }
   sqlite3_finalize(stmt);
@@ -5812,7 +5811,11 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
 
 done:
   sqlite3_finalize(stmt);
-  vec0_free(p);
+  // SQLite keeps a table whose xDestroy fails, and later calls its other
+  // methods and xDisconnect, so free it only on success.
+  if (rc == SQLITE_OK) {
+    vec0_free(p);
+  }
   return rc;
 }
 

@@ -69,6 +69,7 @@
 - Fixed `vec_npy_file()` silently dropping or corrupting vectors on Windows when `float32` payloads contain `0x1A` or CRLF bytes. NumPy files are now opened in binary mode.
 - Fixed `vec_npy_file()` rejecting numpy files larger than 2 GiB on Windows. File positions now use 64-bit APIs instead of Windows' 32-bit `long`.
 - Fixed a crash when `vec0` could not prepare the statement that finds a row's chunk, as when the `_rowids` shadow table is missing or `sqlite3_interrupt()` interrupts the query. Point queries, `UPDATE`, `DELETE`, `INSERT OR REPLACE`, `optimize`, MMR reranking, and queries that return a vector, partition key, metadata, or text primary key column prepare it on first use and again after each transaction that writes to the table, and `vec0` called `sqlite3_clear_bindings()` on the NULL statement when that failed. Such a query now fails instead of crashing; with the `_rowids` table missing, a point query on a rowid, for example, fails with `Internal sqlite-vec error: could not initialize 'rowids get chunk position' statement`.
+- Fixed a crash after a `DROP TABLE` of a `vec0` table failed, as when one of its shadow tables, such as `_info`, was missing, or an interrupt stopped the drop. `vec0` freed the table although SQLite keeps a virtual table whose drop fails, so the failed `DROP TABLE` itself, or else the next query on the table, a later `DROP TABLE`, or closing the connection, used freed memory. The failed `DROP TABLE` still reports `SQL logic error`, and the table stays usable.
 
 ### Infrastructure
 

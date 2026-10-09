@@ -900,6 +900,39 @@ static int test_error_path_leaks(void) {
     goto cleanup;
   }
 
+  // SQLite keeps a table whose DROP fails and disconnects it later, so the
+  // failed xDestroy must neither free the table nor leave it an error message
+  // that nothing frees.
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE v USING vec0(embedding float[4]);"
+                    "DROP TABLE v_info;",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "drop info shadow table");
+  rc = sqlite3_exec(db, "DROP TABLE v", NULL, NULL, NULL);
+  if (rc == SQLITE_OK) {
+    fprintf(stderr, "FAILED: DROP TABLE without its _info table succeeded\n");
+    goto cleanup;
+  }
+  // When dropping _chunks, the first shadow table, fails, SQLite goes on using
+  // the same table.
+  rc = sqlite3_exec(db,
+                    "CREATE VIRTUAL TABLE w USING vec0(embedding float[4]);"
+                    "INSERT INTO w(rowid, embedding) VALUES (1, '[1,2,3,4]');"
+                    "DROP TABLE w_chunks;",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "drop chunks shadow table");
+  rc = sqlite3_exec(db, "DROP TABLE w", NULL, NULL, NULL);
+  if (rc == SQLITE_OK) {
+    fprintf(stderr, "FAILED: DROP TABLE without its _chunks table succeeded\n");
+    goto cleanup;
+  }
+  rc = sqlite3_exec(db,
+                    "SELECT rowid, embedding FROM w;"
+                    "CREATE TABLE w_chunks(x);"
+                    "DROP TABLE w;",
+                    NULL, NULL, NULL);
+  CHECK_OK(rc, "query and drop the table after a failed DROP");
+
   // sqlite3_close() refuses with SQLITE_BUSY while a blob handle is open.
   rc = sqlite3_close(db);
   db = NULL;
