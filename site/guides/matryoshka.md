@@ -21,7 +21,7 @@ They are called "Matryoshka" embeddings after the "Matryoshka dolls", also known
 ## Matryoshka Embeddings with `sqlite-vec`
 
 You can use a combination of [`vec_slice()`](../api-reference.md#vec_slice) and
-[`vec_normalize()`](../api-reference.md#vec_slice) on Matryoshka embeddings to
+[`vec_normalize()`](../api-reference.md#vec_normalize) on Matryoshka embeddings to
 truncate.
 
 ```sql
