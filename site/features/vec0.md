@@ -8,7 +8,7 @@ own benefits and limitations.
 
 ```sql
 create virtual table vec_chunks using vec0(
-  document_id integer partition key,
+  chunk_id integer primary key,
   contents_embedding float[768],
 
   -- partition key column, denoted by 'partition key'
@@ -72,7 +72,7 @@ metadata column values.
 
 #### Metadata Column Declaration
 
-Metatadata columns are declared in the `vec0` constructor just like regular
+Metadata columns are declared in the `vec0` constructor just like regular
 column definitions, with the column name first then the column type.
 
 Only the following column types are supported in metadata columns. All these
@@ -153,8 +153,11 @@ column itself, as for an ordinary table.
 ### Partition Key Columns {#partition-keys}
 
 Partition key columns allow one to internally shard a vector indexed based on a
-given key. Any `=` constraint in a `WHERE` clause on a partition key column will 
-restrict the search to that clause.
+given key. In a KNN query, an `=`, `!=`, `<`, `<=`, `>`, `>=`, or `BETWEEN`
+condition on a partition key column restricts the search to the partitions
+whose key satisfies it. When `vec0` uses such a condition on a `text` key, it
+compares bytewise and ignores any `COLLATE` clause, so
+`name = 'alice' collate nocase` does not search a partition keyed `'Alice'`.
 
 For example, say you're performing vector search on a large dataset of
 documents. However, each document belongs to a user, and users can only search
@@ -191,7 +194,7 @@ collocated together, so this is a fast operation.
 Another example: say you're performing vector search on a large dataset of news
 headlines of the past 100 years. However, in your application, most users only
 want to search a subset of articles based on when they were written, like "in
-the past ten years" or "during the obama administration." You can paritition
+the past ten years" or "during the obama administration." You can partition
 based on published date like so:
 
 ```sql
@@ -211,6 +214,7 @@ select
   distance
 from vec_articles
 where headline_embedding match :query
+  and k = 20
   and published_date between '2009-01-20' and '2017-01-20'; -- Obama administration
 ```
 
@@ -265,10 +269,10 @@ create virtual table vec_image_chunks using vec0(
 
 select
   rowid,
-  contents,
+  image,
   distance
-from vec_chunks
-where contents_embedding match :query
+from vec_image_chunks
+where image_embedding match :query
   and k = 10;
 ```
 
