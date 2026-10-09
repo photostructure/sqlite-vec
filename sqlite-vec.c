@@ -9033,6 +9033,9 @@ static int vec0Column_fullscan(vec0_vtab *pVtab, vec0_cursor *pCur,
   } else if (i == vec0_column_distance_idx(pVtab)) {
     sqlite3_result_null(context);
   } else if (vec0_column_idx_is_partition(pVtab, i)) {
+    if (sqlite3_vtab_nochange(context)) {
+      return SQLITE_OK;
+    }
     int partition_idx = vec0_column_idx_to_partition_idx(pVtab, i);
     sqlite3_value *v;
     int rc =
@@ -9192,6 +9195,9 @@ static int vec0Column_knn(vec0_vtab *pVtab, vec0_cursor *pCur,
                            pVtab->vector_columns[vector_idx].element_type);
     return SQLITE_OK;
   } else if (vec0_column_idx_is_partition(pVtab, i)) {
+    if (sqlite3_vtab_nochange(context)) {
+      return SQLITE_OK;
+    }
     int partition_idx = vec0_column_idx_to_partition_idx(pVtab, i);
     i64 rowid = pCur->knn_data->rowids[pCur->knn_data->current_idx];
     sqlite3_value *v;

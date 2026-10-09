@@ -2083,17 +2083,12 @@ def test_vec0_knn_update_delete():
     for key, key_column, _ in keys:
         for partition_column in ["", "p integer partition key,"]:
             p = ", p" if partition_column else ""
-            # on a table with a partition key column, with or without a primary
-            # key column, every UPDATE through a KNN or full-scan plan fails with
-            # "UPDATE on partition key columns are not supported yet.", so only
-            # DELETE is checked there
-            if partition_column:
-                cases = [
-                    (where, "delete")
-                    for where in wheres + ["a match '[1]' and k = 3 and p = 1"]
-                ]
-            else:
-                cases = [(where, s) for where in wheres for s in ["delete", "update"]]
+            cases = [
+                (where, s)
+                for where in wheres
+                + (["a match '[1]' and k = 3 and p = 1"] if p else [])
+                for s in ["delete", "update"]
+            ]
             for where, statement in cases:
                 db = connect(EXT_PATH)
                 db.execute(
@@ -2138,7 +2133,7 @@ def test_vec0_knn_update_delete():
                     ).rowcount
                     expected = [
                         (
-                            (row[0], "[100.000000]", 99, row[3], "u")
+                            (row[0], "[100.000000]", 99, row[3], "u") + row[5:]
                             if row[0] in selected
                             else row
                         )
@@ -2181,6 +2176,89 @@ def test_vec0_knn_update_delete():
                 f"select {key}, vec_to_json(a), m from v order by {key}"
             )
         ] == before
+
+
+def test_vec0_update_partitioned_table():
+    # On a table with a partition key column, an UPDATE that does not set the
+    # partition key changes the rows its WHERE selects through the full-scan
+    # (1), KNN (3), and point (2) plans. One that sets it, even with SET p = p,
+    # fails on all three and changes no row.
+    keys = [
+        ("rowid", "", lambda i: i),
+        ("id", "id integer primary key,", lambda i: i),
+        ("id", "id text primary key,", lambda i: f"k{i:02d}"),
+    ]
+    partitions = [
+        ("integer", lambda i: i % 2, 5),
+        ("text", lambda i: "odd" if i % 2 else "even", "new"),
+    ]
+    for key, key_column, key_value in keys:
+        for partition_type, partition_value, new_partition_value in partitions:
+            plans = [
+                ("m = 2", [], "1"),
+                ("a match '[5.25]' and k = 4", [], "3"),
+                ("a match '[5.25]' and k = 3 and p = ?", [partition_value(1)], "3"),
+                (f"{key} = ?", [key_value(6)], "2"),
+            ]
+            for where, params, plan in plans:
+                db = connect(EXT_PATH)
+                db.execute(
+                    f"create virtual table v using vec0({key_column}"
+                    f" p {partition_type} partition key, a float[1], m integer,"
+                    " +x text, chunk_size=8)"
+                )
+                db.executemany(
+                    f"insert into v({key}, p, a, m, x) values (?, ?, ?, ?, ?)",
+                    [
+                        [key_value(i), partition_value(i), f"[{i}]", i % 3, f"x{i}"]
+                        for i in range(1, 13)
+                    ],
+                )
+
+                def rows():
+                    return [
+                        tuple(row)
+                        for row in db.execute(
+                            f"select {key}, vec_to_json(a), m, x, p from v order by {key}"
+                        )
+                    ]
+
+                detail = db.execute(
+                    f"explain query plan update v set m = 99 where {where}", params
+                ).fetchone()["detail"]
+                assert re.search(r"INDEX -?\d+:(\d)", detail)[1] == plan, detail
+
+                before = rows()
+                for assignment, value in [
+                    ("p = p", []),
+                    ("p = ?", [new_partition_value]),
+                ]:
+                    with _raises(
+                        "UPDATE on partition key columns are not supported yet."
+                    ):
+                        db.execute(
+                            f"update v set {assignment}, m = 99 where {where}",
+                            value + params,
+                        )
+                    assert rows() == before, (where, assignment)
+
+                selected = [
+                    row[0]
+                    for row in db.execute(f"select {key} from v where {where}", params)
+                ]
+                assert len(selected) > 0
+                changes = db.execute(
+                    f"update v set a = '[100]', m = 99, x = 'u' where {where}", params
+                ).rowcount
+                assert changes == len(selected), where
+                assert rows() == [
+                    (
+                        (row[0], "[100.000000]", 99, "u", row[4])
+                        if row[0] in selected
+                        else row
+                    )
+                    for row in before
+                ], where
 
 
 def test_vec0_best_index():
