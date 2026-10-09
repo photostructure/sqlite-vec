@@ -164,6 +164,8 @@ primary key column. SQLite also passes a one-value `rowid in (?)` this way.
 of a `'['` list, so a query has at most one of the two blocks: with both
 constraints, `vec0` takes the `=` value and leaves the list to SQLite. It
 leaves a text primary key constraint whose collation is not `BINARY` to SQLite.
+For a text primary key, a value that is not text names no row, in this block
+or in a `'['` list.
 
 The remaining 3 characters of the block are `_` fillers.
 
@@ -220,6 +222,10 @@ The fourth character of the block is a `_` filler.
 #### `VEC0_IDXSTR_KIND_POINT_ID` (`'!'`)
 
 `argv[i]` is the value of the rowid or id to match against for the point query.
+For a text primary key, `xBestIndex` leaves `omit` unset and SQLite re-checks
+the row: `vec0` looks the id up in `_rowids.id`, which is declared `TEXT`, so
+the integer 5 finds `'5'`, and SQLite drops that row unless the other side of
+the `=` has numeric affinity.
 
 The remaining 3 characters of the block are `_` fillers.
 

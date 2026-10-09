@@ -6471,7 +6471,11 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
   } else if (iRowidTerm >= 0) {
     sqlite3_str_appendchar(idxStr, 1, VEC0_QUERY_PLAN_POINT);
     pIdxInfo->aConstraintUsage[iRowidTerm].argvIndex = 1;
-    pIdxInfo->aConstraintUsage[iRowidTerm].omit = 1;
+    // vec0 looks a text id up in _rowids.id, which is declared TEXT, so the
+    // integer 5 finds '5'. The id column is declared without a type, so SQLite
+    // re-checks the row with the affinity of the other side: `id = 5` keeps no
+    // row, and `id = x` with x declared INTEGER keeps '5'.
+    pIdxInfo->aConstraintUsage[iRowidTerm].omit = !p->pkIsText;
     sqlite3_str_appendchar(idxStr, 1, VEC0_IDXSTR_KIND_POINT_ID);
     sqlite3_str_appendchar(idxStr, 3, '_');
     pIdxInfo->idxNum = pIdxInfo->colUsed;
@@ -8530,6 +8534,15 @@ static int vec0_knn_rowids_append(vec0_vtab *p, sqlite3_value *value,
                                   struct Array *rowids) {
   i64 rowid;
   if (p->pkIsText) {
+    // vec0 declares a text id column without a type, so a value of another
+    // type equals no id, and vec0_rowid_from_id() would convert the integer 5
+    // to '5'. SQLite cannot re-check these ids, as it does for the point plan,
+    // since a row it dropped would have taken one of the k slots. Like a KNN
+    // metadata filter, this sees only the value, so it also finds no id where
+    // SQLite would convert the id to a number, as for `id = CAST(5 AS INT)`.
+    if (sqlite3_value_type(value) != SQLITE_TEXT) {
+      return SQLITE_OK;
+    }
     int rc = vec0_rowid_from_id(p, value, &rowid);
     if (rc == SQLITE_EMPTY) {
       return SQLITE_OK;

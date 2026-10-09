@@ -1837,6 +1837,92 @@ def test_vec0_rowid_update_delete_values():
     ] == [(0, "[1.000000]"), (5, "[2.000000]")]
 
 
+def test_vec0_text_pk_lookup_values():
+    # vec0 declares a text primary key column without a type, so a value of
+    # another type equals no key, as in `plain`: the integer 5 does not find
+    # the key '5'
+    keys = ["5", "5.0", "5.5", "7", "abc"]
+    db = connect(EXT_PATH)
+
+    def create():
+        db.execute("drop table if exists v")
+        db.execute("drop table if exists plain")
+        db.execute(
+            "create virtual table v using vec0(id text primary key, a float[1], chunk_size=8)"
+        )
+        db.execute("create table plain(id primary key, a) without rowid")
+        for i, key in enumerate(keys):
+            db.execute("insert into v(id, a) values (?, ?)", [key, f"[{i}]"])
+            db.execute("insert into plain values (?, ?)", [key, f"[{i}]"])
+
+    def ids(sql, params=()):
+        return sorted(row[0] for row in db.execute(sql, params))
+
+    values = [None, 5, 5.0, 5.5, "5", "5.0", b"5"]
+    mismatches = []
+    for value in values:
+        create()
+        for where in ["id = ?", "id in (?)", "id in (?, 'abc')"]:
+            want = ids(f"select id from plain where {where}", [value])
+            for sql in [
+                f"select id from v where {where}",
+                f"select id from v where a match '[0]' and k = 10 and {where}",
+            ]:
+                got = ids(sql, [value])
+                if got != want:
+                    mismatches.append((sql, value, got, want))
+        # UPDATE and DELETE select their rows the same way
+        db.execute("update v set a = '[9]' where id = ?", [value])
+        db.execute("update plain set a = '[9]' where id = ?", [value])
+        got = ids("select id from v where vec_to_json(a) = '[9.000000]'")
+        want = ids("select id from plain where a = '[9]'")
+        if got != want:
+            mismatches.append(("update", value, got, want))
+        db.execute("delete from v where id = ?", [value])
+        db.execute("delete from plain where id = ?", [value])
+        got, want = ids("select id from v"), ids("select id from plain")
+        if got != want:
+            mismatches.append(("delete", value, got, want))
+    assert mismatches == []
+
+    # a KNN query looks values up before choosing the k nearest rows, so 5,
+    # which names no key, does not take the only slot from 'abc'
+    assert ids(
+        "select id from v where a match '[0]' and k = 1 and id in (5, 'abc')"
+    ) == ["abc"]
+
+    # SQLite re-checks each row a point lookup returns, so a join from an
+    # untyped column holding 5 and 7 matches no key, as in `plain`, and one
+    # from an integer column matches '5' and '7'. `plain` also matches '5.0'
+    # there, which vec0 finds only when it is scanned first. A KNN query's
+    # lookup finds no key from either column.
+    db.execute("create table ints(x integer)")
+    db.execute("create table untyped(x)")
+    for table in ["ints", "untyped"]:
+        db.executemany(f"insert into {table} values (?)", [[5], [7]])
+    assert ids("select id from plain cross join ints on id = x") == ["5", "5.0", "7"]
+    assert ids("select id from plain cross join untyped on id = x") == []
+    for table, want in [("ints", ["5", "7"]), ("untyped", [])]:
+        for sql in [
+            f"select id from {table} join v on id = x",
+            f"select id from v join {table} on id = x",
+            f"select id from {table} cross join v on id = x",
+        ]:
+            if ids(sql) != want:
+                mismatches.append((sql, ids(sql), want))
+        sql = f"select id from v cross join {table} on id = x"
+        want = ids(f"select id from plain cross join {table} on id = x")
+        if ids(sql) != want:
+            mismatches.append((sql, ids(sql), want))
+        for sql in [
+            f"select id from {table} cross join v on id = x where a match '[0]' and k = 10",
+            f"select id from v where a match '[0]' and k = 10 and id in (select x from {table})",
+        ]:
+            if ids(sql) != []:
+                mismatches.append((sql, ids(sql), []))
+    assert mismatches == []
+
+
 def test_vec0_integer_key_column_is_integer():
     # vec0 declares its rowid column, or an integer primary key column,
     # INTEGER, so SQLite converts a value it compares with the column as it does
