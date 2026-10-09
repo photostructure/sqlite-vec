@@ -246,7 +246,7 @@ void test_vec0_parse_vector_column() {
   // Basic float column
   {
     const char *input = "embedding float[768]";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.name_length == 9);
     assert(strncmp(col.name, "embedding", 9) == 0);
@@ -259,7 +259,7 @@ void test_vec0_parse_vector_column() {
   // f32 alias
   {
     const char *input = "v f32[3]";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_FLOAT32);
     assert(col.dimensions == 3);
@@ -269,7 +269,7 @@ void test_vec0_parse_vector_column() {
   // int8 column
   {
     const char *input = "quantized int8[256]";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_INT8);
     assert(col.dimensions == 256);
@@ -281,7 +281,7 @@ void test_vec0_parse_vector_column() {
   // i8 alias
   {
     const char *input = "q i8[64]";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_INT8);
     assert(col.dimensions == 64);
@@ -291,7 +291,7 @@ void test_vec0_parse_vector_column() {
   // bit column
   {
     const char *input = "bvec bit[1024]";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_BIT);
     assert(col.dimensions == 1024);
@@ -301,7 +301,7 @@ void test_vec0_parse_vector_column() {
   // Column name with underscores and digits
   {
     const char *input = "col_name_2 float[10]";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.name_length == 10);
     assert(strncmp(col.name, "col_name_2", 10) == 0);
@@ -311,7 +311,7 @@ void test_vec0_parse_vector_column() {
   // distance_metric=cosine
   {
     const char *input = "emb float[128] distance_metric=cosine";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
     assert(col.dimensions == 128);
@@ -321,7 +321,7 @@ void test_vec0_parse_vector_column() {
   // distance_metric=L2 (explicit)
   {
     const char *input = "emb float[128] distance_metric=L2";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.distance_metric == VEC0_DISTANCE_METRIC_L2);
     sqlite3_free(col.name);
@@ -330,7 +330,7 @@ void test_vec0_parse_vector_column() {
   // distance_metric=L1
   {
     const char *input = "emb float[128] distance_metric=l1";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_OK);
     assert(col.distance_metric == VEC0_DISTANCE_METRIC_L1);
     sqlite3_free(col.name);
@@ -339,49 +339,49 @@ void test_vec0_parse_vector_column() {
   // Error: empty string
   {
     const char *input = "";
-    rc = vec0_parse_vector_column(input, 0, &col);
+    rc = vec0_parse_vector_column(input, 0, &col, true);
     assert(rc != SQLITE_OK);
   }
 
   // Error: no type
   {
     const char *input = "emb";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc != SQLITE_OK);
   }
 
   // Error: unknown type
   {
     const char *input = "emb double[128]";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc != SQLITE_OK);
   }
 
   // Error: missing dimensions
   {
     const char *input = "emb float";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc != SQLITE_OK);
   }
 
   // Error: unknown distance metric
   {
     const char *input = "emb float[128] distance_metric=hamming";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc != SQLITE_OK);
   }
 
   // Error: unknown option key
   {
     const char *input = "emb float[128] foobar=baz";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc != SQLITE_OK);
   }
 
   // Error: distance_metric on bit type
   {
     const char *input = "emb bit[64] distance_metric=cosine";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc != SQLITE_OK);
   }
 

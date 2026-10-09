@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `vec0` again opens tables whose vector column definition 2.0.2 accepted but 2.1.0 rejects, such as `5 float[4]`, `a float+4+`, or `a float[4] +=cosine`; 2.1.0 failed to open them with errors such as `Could not parse '5 float[4]'`. `CREATE VIRTUAL TABLE` still rejects these definitions.
+
 ## [2.1.0] - 2026-10-08
 
 KNN filters on metadata columns, rowids, and primary keys now compare a bound value or literal the way a plain scan of the same `vec0` table does, and more of them apply before the k nearest rows are chosen, so some queries return different rows. Some statements that used to succeed now fail; read `### Changed` before upgrading. Tables created by earlier releases still open, except those with a malformed vector column definition (see `### Changed`).

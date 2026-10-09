@@ -531,3 +531,75 @@ def test_connect_accepts_keyword_prefix_and_tokens_after_definition(
         == []
     )
     db.close()
+
+
+def connect_file(path):
+    db = sqlite3.connect(path)
+    db.enable_load_extension(True)
+    db.load_extension(get_extension_path())
+    return db
+
+
+# vec0 2.0.2 and earlier accepted any token where a vector column definition
+# has its name, `[`, `]`, and option keys and values, so tables declared like
+# these exist. CREATE rejects these definitions; connect still opens such a
+# table, with the distance metric 2.0.2 read.
+L2 = [(1, 1.0), (2, 1.4142)]
+
+
+@pytest.mark.parametrize(
+    "stored, column, distances",
+    [
+        ("5 float[2]", '"5"', L2),
+        ("= float[2]", '""', L2),
+        ("b float+2+", "b", L2),
+        # `+` and `=` have empty token text, which matches any option key or
+        # value: `distance_metric` as a key, and `l2`, the first value tried
+        ("b float[2] +=cosine", "b", [(1, 0.0), (2, 0.2929)]),
+        ("b float[2] distance_metric=+", "b", L2),
+        ("b float[2] ==l1", "b", [(1, 1.0), (2, 2.0)]),
+    ],
+)
+def test_connect_accepts_vector_definition_earlier_releases_created(
+    db, tmp_path, stored, column, distances
+):
+    with pytest.raises(
+        sqlite3.OperationalError, match="(?i)^vec0 constructor error: could not parse"
+    ):
+        db.execute(f"create virtual table v using vec0({stored})")
+
+    path = str(tmp_path / "test.db")
+    con = connect_file(path)
+    con.execute("create virtual table v using vec0(x float[2])")
+    con.execute("insert into v(rowid, x) values (1, '[1, 0]')")
+    con.execute("pragma writable_schema = on")
+    con.execute(
+        "update sqlite_master set sql = ? where name = 'v'",
+        [f"create virtual table v using vec0({stored})"],
+    )
+    con.commit()
+    con.close()
+
+    con = connect_file(path)
+    con.execute(f"insert into v(rowid, {column}) values (2, '[1, 1]')")
+    rows = con.execute(
+        f"select rowid, round(distance, 4) from v where {column} match '[2, 0]' and k = 2"
+    )
+    assert rows.fetchall() == distances
+    con.close()
+
+
+# 2.0.2 read `+bits text` as a vector column named `+` of type `bits` and
+# failed CREATE; 2.1.0 creates it as an auxiliary column, and connect must keep
+# that reading rather than fall back to 2.0.2's.
+def test_connect_keeps_auxiliary_column_named_like_vector_type(tmp_path):
+    path = str(tmp_path / "test.db")
+    con = connect_file(path)
+    con.execute("create virtual table v using vec0(a float[1], +bits text)")
+    con.execute("insert into v(rowid, a, bits) values (1, '[1]', 'x')")
+    con.commit()
+    con.close()
+
+    con = connect_file(path)
+    assert con.execute("select bits from v where rowid = 1").fetchall() == [("x",)]
+    con.close()

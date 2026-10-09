@@ -70,7 +70,8 @@ struct VectorColumnDefinition {
 };
 
 int vec0_parse_vector_column(const char *source, int source_length,
-                             struct VectorColumnDefinition *outColumn);
+                             struct VectorColumnDefinition *outColumn,
+                             bool strict);
 
 int vec0_parse_partition_key_definition(const char *source, int source_length,
                                         char **out_column_name,

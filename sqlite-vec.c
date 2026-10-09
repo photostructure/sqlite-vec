@@ -2572,11 +2572,16 @@ size_t vector_column_byte_size(struct VectorColumnDefinition column) {
  * @param source vec0 argv[i] item
  * @param source_length length of source in bytes
  * @param outColumn Output the parse vector column to this struct, if success
+ * @param strict true to require an identifier for the name, '[' and ']' around
+ * the dimensions, and identifiers for option keys and values; false to accept
+ * any token there, as vec0 2.0.2 and earlier did when they created tables such
+ * as `5 float[4]` and `a float[4] +=cosine`
  * @return int SQLITE_OK on success, SQLITE_EMPTY is it's not a vector column
  * definition, SQLITE_ERROR on error.
  */
 int vec0_parse_vector_column(const char *source, int source_length,
-                             struct VectorColumnDefinition *outColumn) {
+                             struct VectorColumnDefinition *outColumn,
+                             bool strict) {
   // parses a vector column definition like so:
   // "abc float[123]", "abc_123 bit[1234]", eetc.
   // https://github.com/asg017/sqlite-vec/issues/46
@@ -2596,7 +2601,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   rc = vec0_scanner_next(&scanner, &token);
 
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      (strict && token.token_type != TOKEN_TYPE_IDENTIFIER)) {
     return SQLITE_EMPTY;
   }
 
@@ -2624,7 +2629,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
 
   // left '[' bracket
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_LBRACKET) {
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
+      (strict && token.token_type != TOKEN_TYPE_LBRACKET)) {
     return SQLITE_EMPTY;
   }
 
@@ -2644,7 +2650,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
 
   // // right ']' bracket
   rc = vec0_scanner_next(&scanner, &token);
-  if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_RBRACKET) {
+  if (rc != VEC0_TOKEN_RESULT_SOME ||
+      (strict && token.token_type != TOKEN_TYPE_RBRACKET)) {
     return SQLITE_ERROR;
   }
 
@@ -2658,7 +2665,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
     }
 
     if (rc != VEC0_TOKEN_RESULT_SOME ||
-        token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        (strict && token.token_type != TOKEN_TYPE_IDENTIFIER)) {
       return SQLITE_ERROR;
     }
 
@@ -2679,7 +2686,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
       // distance_metric value, an identifier (L2, cosine, etc)
       rc = vec0_scanner_next(&scanner, &token);
       if (rc != VEC0_TOKEN_RESULT_SOME ||
-          token.token_type != TOKEN_TYPE_IDENTIFIER) {
+          (strict && token.token_type != TOKEN_TYPE_IDENTIFIER)) {
         return SQLITE_ERROR;
       }
 
@@ -5140,7 +5147,17 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
 
     // Scenario #1: Constructor argument is a vector column definition, ie `foo
     // float[1024]`
-    rc = vec0_parse_vector_column(argv[i], strlen(argv[i]), &vecColumn);
+    rc = vec0_parse_vector_column(argv[i], strlen(argv[i]), &vecColumn, true);
+    // vec0 re-parses the stored CREATE text on every connect, and 2.0.2 and
+    // earlier created tables whose vector definitions only the non-strict
+    // parse reads, such as `5 float[4]`. Connect uses that reading only when
+    // the strict parse fails, so `+bits text`, an auxiliary column that 2.0.2
+    // misread as a vector column and rejected, stays an auxiliary column.
+    if (rc != SQLITE_OK && !isCreate &&
+        vec0_parse_vector_column(argv[i], strlen(argv[i]), &vecColumn, false) ==
+            SQLITE_OK) {
+      rc = SQLITE_OK;
+    }
     if (rc == SQLITE_ERROR) {
       *pzErr = sqlite3_mprintf(
           VEC_CONSTRUCTOR_ERROR "could not parse vector column '%s'", argv[i]);
