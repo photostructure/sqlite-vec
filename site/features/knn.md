@@ -95,10 +95,17 @@ These constraints are evaluated while finding nearest neighbors:
 
 | Column Type | Supported Operators | Example |
 |-------------|---------------------|---------|
-| **Metadata columns** | `=`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `LIKE`, `GLOB`, `IS NULL`, `IS NOT NULL` | `AND category = 'electronics'` |
+| **Metadata columns** | `=`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `LIKE`, `GLOB`, `IS`, `IS NOT`, `IS NULL`, `IS NOT NULL` | `AND category = 'electronics'` |
 | **Partition keys** | `=`, `!=`, `<`, `<=`, `>`, `>=` | `AND tenant_id = 123` |
 | **Distance** | `<`, `<=`, `>`, `>=` | `AND distance < 0.5` |
 | **Rowid** | `=`, `IN (...)` | `AND rowid IN (1, 2, 3)` |
+
+Which metadata operators a column takes depends on its type: `IN` works only
+on `integer` and `text` columns, `LIKE` and `GLOB` only on `text` columns, and
+`<`, `<=`, `>`, and `>=` on every type except `boolean`. On other types, these
+operators fail the query, except that an `IN` list of one value, such as
+`in (1.5)`, works on every type, because SQLite passes it to `vec0` as `=`.
+[Metadata columns](./vec0.md#metadata) lists each type's operators.
 
 ```sql
 -- Metadata filter: applied DURING search, guarantees up to k matching results
