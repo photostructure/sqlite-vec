@@ -92,20 +92,63 @@ A maximum of 16 metadata columns can be declared in a `vec0` virtual table.
 
 #### Supported operations
 
-Metadata column `WHERE` conditions in a KNN query will only work on the
-following operators:
+In a KNN query, `vec0` applies the following conditions on metadata columns
+while it searches, so the query returns up to `k` rows that satisfy all of
+them:
 
-- `=` Equals to
-- `!=` Not equals to
-- `>` Greater than
-- `>=` Greater than or equal to
-- `<` Less than
-- `<=` Less than or equal to
+| Operator                          | `text` | `integer` | `float` | `boolean` |
+| --------------------------------- | ------ | --------- | ------- | --------- |
+| `=`, `!=` or `<>`, `IS`, `IS NOT` | yes    | yes       | yes     | yes       |
+| `IS NULL`, `IS NOT NULL`          | yes    | yes       | yes     | yes       |
+| `<`, `<=`, `>`, `>=`, `BETWEEN`   | yes    | yes       | yes     | error     |
+| `IN (...)`                        | yes    | yes       | error   | error     |
+| `LIKE`, `GLOB`                    | yes    | error     | error   | error     |
 
-Using any other operator like `IS NULL`, `LIKE`, `GLOB`, `REGEXP`, or any scalar
-function will result in an error or incorrect results.
+An "error" cell means the query fails with an error, such as `LIKE operator is
+only allowed on TEXT metadata columns.` An `IN` list with a single value works
+on every column type, because SQLite passes it to `vec0` as `=`. `MATCH` on a
+metadata column, and `REGEXP` when the application defines a `regexp()`
+function, fail on every column type with `An illegal WHERE constraint was
+provided on a vec0 metadata column in a KNN query.`
 
-Boolean columns only support `=` and `!=` operators.
+Metadata columns cannot store NULL, so `IS NULL` matches no row and
+`IS NOT NULL` matches every row.
+
+`LIKE` ignores the case of ASCII letters and `GLOB` does not, as in SQLite by
+default.
+
+On a `text` column, `=`, `IS`, `<`, `<=`, `>`, `>=`, and `IN` compare with the
+`BINARY`, `NOCASE`, or `RTRIM` collation that the query names, as in
+`genre = 'SciFi' collate nocase` or
+`genre collate nocase in ('scifi', 'drama')`. Any other collation fails the
+query with `Collation "x" is not supported on the "genre" metadata column in a
+vec0 KNN query. Only BINARY, NOCASE, and RTRIM are supported.` A `!=` or
+`IS NOT` condition with `COLLATE` on the value, as in
+`genre != 'scifi' collate nocase`, can return fewer than `k` rows, because
+`vec0` compares it bytewise and SQLite drops each returned row that equals the
+value under that collation.
+
+SQLite does not pass some conditions on metadata columns to `vec0`, and
+instead applies them to the `k` rows that `vec0` returns. A KNN query with such
+a condition can return fewer than `k` rows, and if it uses `LIMIT` instead of
+`k = ?`, it fails with `A LIMIT or 'k = ?' constraint is required on vec0 knn
+queries.` These conditions include:
+
+- `NOT IN`, `NOT LIKE`, and `NOT GLOB`
+- `LIKE ... ESCAPE`. For some patterns that begin with literal text, such as
+  `'sci!_fi%' escape '!'`, SQLite instead passes `vec0` range conditions that
+  select the same rows, so the query returns up to `k` matching rows and works
+  with `LIMIT`.
+- `!=` and `IS NOT` with `COLLATE` on the column, as in
+  `genre collate nocase != 'scifi'`
+- `IS TRUE`, `IS FALSE`, and a boolean column on its own, as in
+  `and contains_violence` or `and not contains_violence`
+- conditions joined with `OR`, except `=` conditions on one column, which
+  SQLite turns into `IN`
+- conditions on an expression, such as `lower(genre) = 'scifi'`
+
+Outside a KNN query, SQLite applies every `WHERE` condition on a metadata
+column itself, as for an ordinary table.
 
 ### Partition Key Columns {#partition-keys}
 
