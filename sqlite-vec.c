@@ -8491,7 +8491,16 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
     goto cleanup;
   }
 
-  i64 k = sqlite3_value_int64(argv[k_idx]);
+  // numeric affinity, then an integer, as SQLite requires of LIMIT
+  i64 k;
+  int k_type = sqlite3_value_numeric_type(argv[k_idx]);
+  if (!vec0_value_as_i64(argv[k_idx], &k)) {
+    vtab_set_error(&p->base,
+                   "k value in knn query must be an integer, provided %s",
+                   type_name(k_type));
+    rc = SQLITE_ERROR;
+    goto cleanup;
+  }
   if (k < 0) {
     vtab_set_error(
         &p->base, "k value in knn queries must be greater than or equal to 0.");

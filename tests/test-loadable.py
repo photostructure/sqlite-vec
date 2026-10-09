@@ -279,6 +279,61 @@ def test_limits():
         db.execute("select * from v where a match '[0.1]' and k = 8193")
 
 
+@pytest.mark.parametrize(
+    "value, provided",
+    [
+        (None, "NULL"),
+        ("abc", "TEXT"),
+        ("", "TEXT"),
+        ("5abc", "TEXT"),
+        (b"\x00", "BLOB"),
+        (b"5", "BLOB"),
+        (5.5, "FLOAT"),
+        ("0.5", "FLOAT"),
+        (1e19, "FLOAT"),
+        (-1e19, "FLOAT"),
+    ],
+)
+def test_vec0_knn_k_non_integer(value, provided):
+    db = connect(EXT_PATH)
+    db.execute("create virtual table v using vec0(a float[1])")
+    db.execute("insert into v(rowid, a) values (1, '[1]')")
+
+    # SQLite's LIMIT rejects the same values
+    with _raises("datatype mismatch", sqlite3.IntegrityError):
+        db.execute("select 1 limit ?", [value]).fetchall()
+    with _raises(f"k value in knn query must be an integer, provided {provided}"):
+        db.execute("select rowid from v where a match '[1]' and k = ?", [value])
+
+
+@pytest.mark.parametrize(
+    "value, n",
+    [
+        (5, 5),
+        (5.0, 5),
+        ("5", 5),
+        (" 5", 5),
+        ("5.0", 5),
+        ("5e0", 5),
+        (0, 0),
+        (0.0, 0),
+        ("0", 0),
+    ],
+)
+def test_vec0_knn_k_integer_value(value, n):
+    db = connect(EXT_PATH)
+    db.execute("create table t(a)")
+    db.execute("create virtual table v using vec0(a float[1])")
+    for i in range(1, 11):
+        db.execute("insert into t(rowid, a) values (?, ?)", [i, i])
+        db.execute("insert into v(rowid, a) values (?, ?)", [i, f"[{i}]"])
+
+    # SQLite's LIMIT accepts the same values
+    assert len(db.execute("select rowid from t limit ?", [value]).fetchall()) == n
+    rowids = db.execute("select rowid from v where a match '[1]' and k = ?", [value])
+    assert [row[0] for row in rowids] == list(range(1, n + 1))
+
+
 def test_funcs():
     funcs = list(
         map(
