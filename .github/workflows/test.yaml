@@ -35,7 +35,9 @@ jobs:
           enable-cache: true
       - run: ./scripts/vendor.sh
       - run: make loadable static
-      - run: uv sync --locked --directory tests
+      # Ubuntu's system Python links the system SQLite (3.45.1 on 24.04); uv's
+      # managed Python bundles a newer one, as on the macOS runners
+      - run: uv sync --locked --managed-python --directory tests
       - run: make test-loadable python=./tests/.venv/bin/python
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
