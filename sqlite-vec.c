@@ -8896,11 +8896,8 @@ static int vec0Rowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
     return SQLITE_OK;
   }
   case VEC0_QUERY_PLAN_KNN: {
-    vtab_set_error(cur->pVtab,
-                   "Internal sqlite-vec error: expected point query plan in "
-                   "vec0Rowid, found %d",
-                   pCur->query_plan);
-    return SQLITE_ERROR;
+    *pRowid = pCur->knn_data->rowids[pCur->knn_data->current_idx];
+    return SQLITE_OK;
   }
   }
   return SQLITE_ERROR;

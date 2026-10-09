@@ -2010,6 +2010,127 @@ def test_vec0_integer_key_update():
         )
 
 
+def test_vec0_knn_update_delete():
+    # UPDATE and DELETE with a KNN WHERE change exactly the rows the same KNN
+    # SELECT returns before the statement. SQLite collects every matching rowid
+    # before it changes a row; the results span chunks of 8, and k = 50 is more
+    # than the table's 20 rows, so that DELETE empties every chunk.
+    wheres = [
+        "a match '[1]' and k = 5",
+        "a match '[10.25]' and k = 12",
+        "a match '[10.25]' and k = 6 and m = 1",
+        "a match '[3.25]' and k = 4 and t = 'odd'",
+        "a match '[5.25]' and k = 10 and distance > 2.5",
+        "a match '[1]' and k = 50",
+    ]
+    keys = [
+        ("rowid", "", ["rowid", "oid", "_rowid_"]),
+        ("rowid", "rowid integer primary key,", ["rowid"]),
+        ("id", "id integer primary key,", ["id"]),
+    ]
+    for key, key_column, _ in keys:
+        for partition_column in ["", "p integer partition key,"]:
+            p = ", p" if partition_column else ""
+            # on a table with a partition key column, with or without a primary
+            # key column, every UPDATE through a KNN or full-scan plan fails with
+            # "UPDATE on partition key columns are not supported yet.", so only
+            # DELETE is checked there
+            if partition_column:
+                cases = [
+                    (where, "delete")
+                    for where in wheres + ["a match '[1]' and k = 3 and p = 1"]
+                ]
+            else:
+                cases = [(where, s) for where in wheres for s in ["delete", "update"]]
+            for where, statement in cases:
+                db = connect(EXT_PATH)
+                db.execute(
+                    f"create virtual table v using vec0({key_column} {partition_column}"
+                    " a float[1], m integer, t text, +x text, chunk_size=8)"
+                )
+                db.executemany(
+                    f"insert into v({key}, a, m, t, x{p}) "
+                    f"values (?, ?, ?, ?, ?{', ?' if p else ''})",
+                    [
+                        [
+                            i * 3,
+                            f"[{i}]",
+                            i % 3,
+                            "odd" if i % 2 else f"even, longer than 12 bytes {i}",
+                            f"x{i}",
+                        ]
+                        + ([i % 2] if p else [])
+                        for i in range(1, 21)
+                    ],
+                )
+
+                def rows():
+                    return [
+                        tuple(row)
+                        for row in db.execute(
+                            f"select {key}, vec_to_json(a), m, t, x{p} from v order by {key}"
+                        )
+                    ]
+
+                before = rows()
+                selected = [
+                    row[0] for row in db.execute(f"select {key} from v where {where}")
+                ]
+                assert len(selected) > 0
+                if statement == "delete":
+                    changes = db.execute(f"delete from v where {where}").rowcount
+                    expected = [row for row in before if row[0] not in selected]
+                else:
+                    changes = db.execute(
+                        f"update v set a = '[100]', m = 99, x = 'u' where {where}"
+                    ).rowcount
+                    expected = [
+                        (
+                            (row[0], "[100.000000]", 99, row[3], "u")
+                            if row[0] in selected
+                            else row
+                        )
+                        for row in before
+                    ]
+                assert changes == len(selected), (where, statement)
+                assert rows() == expected, (where, statement)
+
+    # a KNN UPDATE that changes the key fails, as a rowid UPDATE does; xRowid
+    # also serves oid and _rowid_ on a table without a primary key column
+    for key, key_column, key_names in keys:
+        db = connect(EXT_PATH)
+        db.execute(
+            f"create virtual table v using vec0({key_column} a float[1], m integer, chunk_size=8)"
+        )
+        db.executemany(
+            f"insert into v({key}, a, m) values (?, ?, 0)",
+            [[i * 3, f"[{i}]"] for i in range(1, 21)],
+        )
+        before = [
+            tuple(row)
+            for row in db.execute(
+                f"select {key}, vec_to_json(a), m from v order by {key}"
+            )
+        ]
+        for name in key_names:
+            assert [
+                row[0]
+                for row in db.execute(
+                    f"select {name} from v where a match '[10.25]' and k = 3"
+                )
+            ] == [30, 33, 27]
+            with _raises("UPDATEs on vec0 primary key values are not allowed."):
+                db.execute(
+                    f"update v set {name} = 500, m = 9 where a match '[10.25]' and k = 3"
+                )
+        assert [
+            tuple(row)
+            for row in db.execute(
+                f"select {key}, vec_to_json(a), m from v order by {key}"
+            )
+        ] == before
+
+
 def test_vec0_best_index():
     db = connect(EXT_PATH)
     db.execute("""
