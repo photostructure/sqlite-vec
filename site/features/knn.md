@@ -98,7 +98,7 @@ These constraints are evaluated while finding nearest neighbors:
 | **Metadata columns** | `=`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `LIKE`, `GLOB`, `IS NULL`, `IS NOT NULL` | `AND category = 'electronics'` |
 | **Partition keys** | `=`, `!=`, `<`, `<=`, `>`, `>=` | `AND tenant_id = 123` |
 | **Distance** | `<`, `<=`, `>`, `>=` | `AND distance < 0.5` |
-| **Rowid** | `IN (...)` | `AND rowid IN (1, 2, 3)` |
+| **Rowid** | `=`, `IN (...)` | `AND rowid IN (1, 2, 3)` |
 
 ```sql
 -- Metadata filter: applied DURING search, guarantees up to k matching results

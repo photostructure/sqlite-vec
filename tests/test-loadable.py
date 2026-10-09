@@ -1699,19 +1699,72 @@ def test_vec0_rowid_constraint_values():
             mismatches.append(("knn rowid in", value, rowids(knn, value), want_in))
         if rowids(point, value) != want_eq:
             mismatches.append(("rowid =", value, rowids(point, value), want_eq))
+        # a KNN query looks up one value before choosing the k nearest rows, so
+        # it finds rowid 5 although rowid 0 is nearer. SQLite passes a one-value
+        # `in (?)` as `= ?`.
+        for knn_eq in [
+            "select rowid from v where a match '[0]' and k = 1 and rowid = ?",
+            "select rowid from v where a match '[0]' and k = 1 and rowid in (?)",
+            "select rowid from v where a match '[0]' and rowid = ? order by distance limit 1",
+        ]:
+            if rowids(knn_eq, value) != want_eq:
+                mismatches.append((knn_eq, value, rowids(knn_eq, value), want_eq))
     assert mismatches == []
+
+    # with both, vec0 looks up the `= ?` value and SQLite checks the list
+    assert rowids(
+        "select rowid from v where a match '[0]' and k = 1 and rowid in (5, 1) and rowid = ?",
+        5,
+    ) == [5]
+    assert (
+        rowids(
+            "select rowid from v where a match '[0]' and k = 1 and rowid in (6, 1) and rowid = ?",
+            5,
+        )
+        == []
+    )
+    # when a join takes the value from a table SQLite scans first, vec0 looks
+    # up each value, as it does for a `rowid in (...)` that names it
+    db.execute("create table outer_ids(x integer)")
+    db.executemany("insert into outer_ids values (?)", [[5], [6]])
+    for on in ["v.rowid = o.x", "v.rowid in (o.x, 99)"]:
+        assert sorted(
+            row[0]
+            for row in db.execute(
+                f"select v.rowid from outer_ids o cross join v on {on} where v.a match '[0]' and k = 1"
+            )
+        ) == [5, 6]
 
     # an id that names no row matches nothing, and the others still match
     db.execute(
         "create virtual table t using vec0(id text primary key, a float[1], chunk_size=8)"
     )
-    db.execute("insert into t(id, a) values ('a', '[1]'), ('b', '[2]')")
+    db.execute("insert into t(id, a) values ('a', '[1]'), ('b', '[2]'), ('B', '[3]')")
     assert sorted(
         row[0]
         for row in db.execute(
             "select id from t where a match '[0]' and k = 10 and id in ('a', 'missing', null)"
         )
     ) == ["a"]
+
+    def ids(sql):
+        return sorted(row[0] for row in db.execute(sql))
+
+    # a one-value id lookup also comes before choosing the k nearest rows
+    assert ids("select id from t where a match '[0]' and k = 1 and id = 'b'") == ["b"]
+    assert ids("select id from t where a match '[0]' and k = 1 and id in ('b')") == [
+        "b"
+    ]
+    assert ids(
+        "select id from t where a match '[0]' and id = 'b' order by distance limit 1"
+    ) == ["b"]
+    assert ids("select id from t where a match '[0]' and k = 1 and id = 'x'") == []
+    assert ids("select id from t where a match '[0]' and k = 1 and id = null") == []
+    # vec0 looks an id up with BINARY, so it leaves an id compared with another
+    # collation for SQLite to check
+    assert ids(
+        "select id from t where a match '[0]' and k = 10 and id = 'b' collate nocase"
+    ) == ["B", "b"]
 
 
 def test_vec0_rowid_update_delete_values():
@@ -1733,8 +1786,7 @@ def test_vec0_integer_key_column_is_integer():
     # vec0 declares its rowid column, or an integer primary key column,
     # INTEGER, so SQLite converts a value it compares with the column as it does
     # for `plain`'s integer primary key, also where SQLite evaluates the
-    # constraint itself: a range on a full scan, and `= ?` or a one-value
-    # `in (?)` in a KNN query
+    # constraint itself: a range on a full scan or in a KNN query
     db = connect(EXT_PATH)
     db.execute("create table plain(id integer primary key)")
     db.executemany("insert into plain values (?)", [[1], [5], [6]])

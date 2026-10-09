@@ -156,6 +156,17 @@ The remaining 3 characters of the block are `_` fillers.
 
 The remaining 3 characters of the block are `_` fillers.
 
+#### `VEC0_IDXSTR_KIND_KNN_ROWID_EQ` (`'='`)
+
+`argv[i]` is the optional `rowid = ?` value, or `id = ?` for a table with a
+primary key column. SQLite also passes a one-value `rowid in (?)` this way.
+`vec0` restricts the KNN search to the row it names, as it does for each value
+of a `'['` list, so a query has at most one of the two blocks: with both
+constraints, `vec0` takes the `=` value and leaves the list to SQLite. It
+leaves a text primary key constraint whose collation is not `BINARY` to SQLite.
+
+The remaining 3 characters of the block are `_` fillers.
+
 #### `VEC0_IDXSTR_KIND_KNN_PARTITON_CONSTRAINT` (`']'`)
 
 `argv[i]` is a "constraint" on a specific partition key.

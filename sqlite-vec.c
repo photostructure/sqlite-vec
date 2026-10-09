@@ -5820,6 +5820,8 @@ typedef enum {
   VEC0_IDXSTR_KIND_KNN_MATCH = '{',
   VEC0_IDXSTR_KIND_KNN_K = '}',
   VEC0_IDXSTR_KIND_KNN_ROWID_IN = '[',
+  // argv[i] is the value of a `rowid = ?` constraint in a KNN query
+  VEC0_IDXSTR_KIND_KNN_ROWID_EQ = '=',
   // argv[i] is a constraint on a PARTITON KEY column in a KNN query
   //
   VEC0_IDXSTR_KIND_KNN_PARTITON_CONSTRAINT = ']',
@@ -5901,7 +5903,7 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
    *    a) An `MATCH` op on vector column
    *    b) ORDER BY on distance column
    *    c) LIMIT
-   *    d) rowid in (...) OPTIONAL
+   *    d) rowid = ? or rowid in (...) OPTIONAL
    * 2. Point when:
    *    a) An `EQ` op on rowid column
    * 3. else: fullscan
@@ -6047,8 +6049,20 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
     sqlite3_str_appendchar(idxStr, 1, VEC0_IDXSTR_KIND_KNN_K);
     sqlite3_str_appendchar(idxStr, 3, '_');
 
+    // SQLite passes a one-value `rowid in (?)` as `rowid = ?`. vec0 looks up a
+    // text id with BINARY, so it leaves an id compared with another collation
+    // to SQLite. With both forms, vec0 looks up the `=` value and SQLite checks
+    // the list.
+    if (iRowidTerm >= 0 &&
+        (!p->pkIsText ||
+         sqlite3_stricmp(sqlite3_vtab_collation(pIdxInfo, iRowidTerm),
+                         "BINARY") == 0)) {
+      pIdxInfo->aConstraintUsage[iRowidTerm].argvIndex = argvIndex++;
+      pIdxInfo->aConstraintUsage[iRowidTerm].omit = 1;
+      sqlite3_str_appendchar(idxStr, 1, VEC0_IDXSTR_KIND_KNN_ROWID_EQ);
+      sqlite3_str_appendchar(idxStr, 3, '_');
 #if COMPILER_SUPPORTS_VTAB_IN
-    if (iRowidInTerm >= 0) {
+    } else if (iRowidInTerm >= 0) {
       // already validated as  >= SQLite 3.38 bc iRowidInTerm is only >= 0 when
       // vtabIn == 1
       sqlite3_vtab_in(pIdxInfo, iRowidInTerm, 1);
@@ -6056,8 +6070,8 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
       pIdxInfo->aConstraintUsage[iRowidInTerm].omit = 1;
       sqlite3_str_appendchar(idxStr, 1, VEC0_IDXSTR_KIND_KNN_ROWID_IN);
       sqlite3_str_appendchar(idxStr, 3, '_');
-    }
 #endif
+    }
 
     // find any PARTITION KEY column constraints
     for (int i = 0; i < pIdxInfo->nConstraint; i++) {
@@ -6764,10 +6778,9 @@ static int vec0_is_prefix_only_glob_pattern(const char *pattern, int n) {
 // A `distance` filter still rounds a numeric value to float before comparing.
 // vec0 declares its `rowid` column, or an integer primary key column, INTEGER,
 // so SQLite applies numeric affinity to a value it compares with that column,
-// as with an ordinary table's rowid. vec0's own rowid lookups (`rowid = ?`
-// without `match`, and a KNN query's `rowid in (...)` of two or more values)
-// do the same, as SQLite does for an INTEGER PRIMARY KEY, so '5' finds rowid 5
-// either way.
+// as with an ordinary table's rowid. vec0's own rowid lookups (`rowid = ?`, and
+// a KNN query's `rowid in (...)`) do the same, as SQLite does for an INTEGER
+// PRIMARY KEY, so '5' finds rowid 5 either way.
 
 // Whether a comparison holds, given the sign of a row's value compared with
 // the constraint's value.
@@ -8374,6 +8387,26 @@ cleanup:
   return rc;
 }
 
+// Appends the rowid that a value of a KNN query's `rowid = ?` or
+// `rowid in (...)` names to rowids. A value that equals no rowid, or an id that
+// is not in the table, appends nothing.
+static int vec0_knn_rowids_append(vec0_vtab *p, sqlite3_value *value,
+                                  struct Array *rowids) {
+  i64 rowid;
+  if (p->pkIsText) {
+    int rc = vec0_rowid_from_id(p, value, &rowid);
+    if (rc == SQLITE_EMPTY) {
+      return SQLITE_OK;
+    }
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  } else if (!vec0_value_as_rowid(value, &rowid)) {
+    return SQLITE_OK;
+  }
+  return array_append(rowids, &rowid);
+}
+
 int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
                    const char *idxStr, int argc, sqlite3_value **argv) {
   assert(argc == (int)((strlen(idxStr) - 1) / 4));
@@ -8403,6 +8436,7 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
   int query_idx = -1;
   int k_idx = -1;
   int rowid_in_idx = -1;
+  int rowid_eq_idx = -1;
   int mmr_lambda_idx = -1;
   for (int i = 0; i < argc; i++) {
     if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_MATCH) {
@@ -8413,6 +8447,9 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
     }
     if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_ROWID_IN) {
       rowid_in_idx = i;
+    }
+    if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_ROWID_EQ) {
+      rowid_eq_idx = i;
     }
     if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_MMR_LAMBDA) {
       mmr_lambda_idx = i;
@@ -8504,12 +8541,10 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
     }
   }
 
-// handle when a `rowid in (...)` operation was provided
-// Array of all the rowids that appear in any `rowid in (...)` constraint.
-// NULL if none were provided, which means a "full" scan.
-#if COMPILER_SUPPORTS_VTAB_IN
-  if (rowid_in_idx >= 0) {
-    sqlite3_value *item;
+  // handle when a `rowid = ?` or `rowid in (...)` operation was provided
+  // Array of all the rowids that it names. NULL if neither was provided, which
+  // means a "full" scan.
+  if (rowid_eq_idx >= 0 || rowid_in_idx >= 0) {
     arrayRowidsIn = sqlite3_malloc(sizeof(*arrayRowidsIn));
     if (!arrayRowidsIn) {
       rc = SQLITE_NOMEM;
@@ -8521,35 +8556,32 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
     if (rc != SQLITE_OK) {
       goto cleanup;
     }
-    for (rc = sqlite3_vtab_in_first(argv[rowid_in_idx], &item);
-         rc == SQLITE_OK && item;
-         rc = sqlite3_vtab_in_next(argv[rowid_in_idx], &item)) {
-      i64 rowid;
-      if (p->pkIsText) {
-        rc = vec0_rowid_from_id(p, item, &rowid);
-        if (rc == SQLITE_EMPTY) {
-          // an id that is not in the table matches no row
-          continue;
-        }
-        if (rc != SQLITE_OK) {
-          goto cleanup;
-        }
-      } else if (!vec0_value_as_rowid(item, &rowid)) {
-        continue;
-      }
-      rc = array_append(arrayRowidsIn, &rowid);
+    if (rowid_eq_idx >= 0) {
+      rc = vec0_knn_rowids_append(p, argv[rowid_eq_idx], arrayRowidsIn);
       if (rc != SQLITE_OK) {
         goto cleanup;
       }
     }
-    if (rc != SQLITE_DONE) {
-      vtab_set_error(&p->base, "error processing rowid in (...) array");
-      goto cleanup;
+#if COMPILER_SUPPORTS_VTAB_IN
+    if (rowid_in_idx >= 0) {
+      sqlite3_value *item;
+      for (rc = sqlite3_vtab_in_first(argv[rowid_in_idx], &item);
+           rc == SQLITE_OK && item;
+           rc = sqlite3_vtab_in_next(argv[rowid_in_idx], &item)) {
+        rc = vec0_knn_rowids_append(p, item, arrayRowidsIn);
+        if (rc != SQLITE_OK) {
+          goto cleanup;
+        }
+      }
+      if (rc != SQLITE_DONE) {
+        vtab_set_error(&p->base, "error processing rowid in (...) array");
+        goto cleanup;
+      }
+      qsort(arrayRowidsIn->z, arrayRowidsIn->length,
+            arrayRowidsIn->element_size, _cmp);
     }
-    qsort(arrayRowidsIn->z, arrayRowidsIn->length, arrayRowidsIn->element_size,
-          _cmp);
-  }
 #endif
+  }
 
 #if COMPILER_SUPPORTS_VTAB_IN
   for (int i = 0; i < argc; i++) {
