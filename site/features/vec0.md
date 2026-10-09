@@ -8,7 +8,7 @@ own benefits and limitations.
 
 ```sql
 create virtual table vec_chunks using vec0(
-  chunk_id integer primary key,
+  document_id integer partition key,
   contents_embedding float[768],
 
   -- partition key column, denoted by 'partition key'
