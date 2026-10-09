@@ -238,3 +238,13 @@ result in precision loss for very small distance differences.
 **Note on pagination:** When multiple vectors have identical distances, pagination using
 `distance > X` may skip some results. For stable pagination, combine distance with rowid:
 `WHERE (distance > 0.5) OR (distance = 0.5 AND rowid > 123)`
+
+#### `VEC0_IDXSTR_KIND_KNN_MMR_LAMBDA` (`'#'`)
+
+`argv[i]` is the value of the optional `mmr_lambda = ?` constraint of a KNN
+query. Unless `k` is 0, `vec0Filter_knn` reads it with `sqlite3_value_double()`,
+converts it to `f32`, and fails the query if it is below 0.0 or above 1.0. For
+a value below 1.0, it fetches the `k * 5` nearest rows (at most 4096) and, if
+it finds more than `k`, selects `k` of them by MMR.
+
+The remaining 3 characters of the block are `_` fillers.
