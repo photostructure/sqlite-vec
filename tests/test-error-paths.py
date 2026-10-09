@@ -12,6 +12,8 @@ import pytest
 import struct
 import re
 
+from conftest import get_extension_path
+
 
 def _raises(message, error=sqlite3.OperationalError):
     """Context manager for testing expected errors."""
@@ -303,10 +305,6 @@ def test_rowids_shadow_insert_reports_real_error(db):
     assert "no such table" in str(excinfo.value)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def test_point_query_reports_unpreparable_rowid_lookup(db):
     # vec0 prepares its rowid-to-chunk lookup on first use, and called
     # sqlite3_clear_bindings() on the NULL statement when that prepare failed.
@@ -315,3 +313,167 @@ def test_point_query_reports_unpreparable_rowid_lookup(db):
     db.execute("DROP TABLE test_rowids")
     with _raises("could not initialize 'rowids get chunk position' statement"):
         db.execute("SELECT * FROM test WHERE rowid = 1").fetchall()
+
+
+def test_optimize_reports_missing_partition_chunk(db):
+    # optimize returned SQLITE_ROW when it could not look up a chunk's
+    # partition key, so sqlite3_step() returned SQLITE_ROW: the caller saw
+    # success and SQLite rolled the optimize back.
+    db.execute(
+        "CREATE VIRTUAL TABLE test USING vec0(p integer partition key, "
+        "v float[1], chunk_size=8)"
+    )
+    db.executemany(
+        "INSERT INTO test(rowid, p, v) VALUES (?, ?, ?)",
+        [(i, i % 2, f"[{i}]") for i in range(1, 5)],
+    )
+    db.execute("DELETE FROM test_chunks WHERE chunk_id = 1")
+    with _raises("SQL logic error"):
+        db.execute("INSERT INTO test(test) VALUES ('optimize')")
+
+
+@pytest.fixture(scope="module")
+def interrupt_template():
+    db = sqlite3.connect(":memory:")
+    db.enable_load_extension(True)
+    db.load_extension(get_extension_path())
+    # Text values are longer than the 12 bytes a metadata chunk holds, so
+    # filters and reads go to the _metadatatext table. v's one chunk is full,
+    # so an INSERT adds a chunk; vp has a deleted row for optimize to skip.
+    db.execute(
+        "CREATE VIRTUAL TABLE v USING vec0(vector float[2], m integer, t text, "
+        "+a text, chunk_size=8)"
+    )
+    db.executemany(
+        "INSERT INTO v(rowid, vector, m, t, a) VALUES (?, ?, ?, ?, ?)",
+        [
+            (i, f"[{i}, {i % 3}]", i % 4, f"text value number {i:05d}", f"aux {i}")
+            for i in range(1, 9)
+        ],
+    )
+    db.execute(
+        "CREATE VIRTUAL TABLE vp USING vec0(p integer partition key, "
+        "vector float[2], m integer, chunk_size=8)"
+    )
+    db.executemany(
+        "INSERT INTO vp(rowid, p, vector, m) VALUES (?, ?, ?, ?)",
+        [(i, i % 2, f"[{i}, {i % 3}]", i % 4) for i in range(1, 5)],
+    )
+    db.execute("DELETE FROM vp WHERE rowid = 2")
+    db.execute(
+        "CREATE VIRTUAL TABLE vt USING vec0(id text primary key, vector float[2], "
+        "chunk_size=8)"
+    )
+    db.executemany(
+        "INSERT INTO vt(id, vector) VALUES (?, ?)",
+        [(f"id{i}", f"[{i}, {i % 3}]") for i in range(1, 9)],
+    )
+    db.commit()
+    return db.serialize()
+
+
+def _run_interrupted(template, sql, n, mode):
+    """Runs sql on a new connection to a copy of template and interrupts it at
+    the n-th progress handler call: the handler returns 1 from then on in
+    "progress" mode and calls sqlite3_interrupt() in "interrupt" mode. Returns
+    the number of calls, the error or None, the rows, and the database image.
+    """
+    db = sqlite3.connect(":memory:", isolation_level=None)
+    db.deserialize(template)
+    db.enable_load_extension(True)
+    db.load_extension(get_extension_path())
+    # load the schema before counting calls
+    db.execute("SELECT count(*) FROM sqlite_master").fetchall()
+    calls = 0
+
+    def handler():
+        nonlocal calls
+        calls += 1
+        if mode == "interrupt" and calls == n:
+            db.interrupt()
+        return mode == "progress" and n is not None and calls >= n
+
+    db.set_progress_handler(handler, 1)
+    error = rows = None
+    try:
+        rows = db.execute(sql).fetchall()
+    except sqlite3.Error as e:
+        error = e
+    db.set_progress_handler(None, 1)
+    image = db.serialize()
+    db.close()
+    return calls, error, rows, image
+
+
+@pytest.mark.parametrize("mode", ["progress", "interrupt"])
+@pytest.mark.parametrize(
+    "sql",
+    [
+        pytest.param(
+            "SELECT rowid, distance, vector, m, t, a FROM v "
+            "WHERE vector MATCH '[3, 4]' AND k = 3 "
+            "AND t >= 'text value number 00002' AND mmr_lambda = 0.5",
+            id="knn",
+        ),
+        pytest.param(
+            "SELECT rowid, p, vector FROM vp WHERE vector MATCH '[3, 4]' AND k = 3 "
+            "AND p = 1",
+            id="knn-partition",
+        ),
+        pytest.param(
+            "SELECT id, distance FROM vt WHERE vector MATCH '[3, 4]' AND k = 3",
+            id="knn-text-pk",
+        ),
+        pytest.param("SELECT rowid, vector, m, t, a FROM v", id="fullscan"),
+        pytest.param("SELECT rowid, p, vector, m FROM vp", id="fullscan-partition"),
+        pytest.param(
+            "SELECT rowid, vector, m, t, a FROM v WHERE rowid = 4", id="point"
+        ),
+        pytest.param(
+            "SELECT rowid, vector, m, t, a FROM v WHERE rowid = 99", id="point-missing"
+        ),
+        pytest.param("SELECT id, vector FROM vt WHERE id = 'id4'", id="point-text-pk"),
+        pytest.param(
+            "INSERT INTO v(rowid, vector, m, t, a) "
+            "VALUES (100, '[1, 1]', 1, 'a long text value here', 'x')",
+            id="insert",
+        ),
+        pytest.param(
+            "INSERT INTO vt(id, vector) VALUES ('new', '[1, 1]')", id="insert-text-pk"
+        ),
+        pytest.param(
+            "INSERT OR REPLACE INTO v(rowid, vector, m, t, a) "
+            "VALUES (4, '[1, 1]', 1, 'a long text value here', 'x')",
+            id="insert-or-replace",
+        ),
+        pytest.param(
+            "UPDATE v SET vector = '[9, 9]', m = 5, t = 'another long text value', "
+            "a = 'zzz' WHERE rowid = 4",
+            id="update",
+        ),
+        pytest.param("DELETE FROM v WHERE rowid = 4", id="delete"),
+        pytest.param("DELETE FROM vt WHERE id = 'id4'", id="delete-text-pk"),
+        pytest.param("INSERT INTO vp(vp) VALUES ('optimize')", id="optimize"),
+    ],
+)
+def test_interrupt_is_reported_as_interrupt(interrupt_template, sql, mode):
+    # vec0 used to replace SQLITE_INTERRUPT from its internal statements with
+    # SQLITE_ERROR and a message of its own. Interrupt sql at every progress
+    # handler call and expect what an ordinary table reports.
+    total, error, rows, image = _run_interrupted(interrupt_template, sql, None, mode)
+    assert error is None
+    for n in range(1, total + 1):
+        _, error, n_rows, n_image = _run_interrupted(interrupt_template, sql, n, mode)
+        if error is None:
+            # sqlite3_interrupt() has no effect once no statement is running
+            assert mode == "interrupt", n
+            assert (n_rows, n_image) == (rows, image), n
+        else:
+            assert (error.sqlite_errorname, str(error)) == (
+                "SQLITE_INTERRUPT",
+                "interrupted",
+            ), n
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
