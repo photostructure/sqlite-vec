@@ -66,6 +66,7 @@
 - Fixed a crash in KNN queries that compared a `text` metadata column with NULL using `<`, `<=`, `>`, or `>=`, such as `t > ?` bound to NULL, when a row's value was longer than 12 bytes. Fixed by the [vlasky#12](https://github.com/vlasky/sqlite-vec/pull/12) port above, which gives such a filter its result without reading the column.
 - Fixed `vec_npy_file()` silently dropping or corrupting vectors on Windows when `float32` payloads contain `0x1A` or CRLF bytes. NumPy files are now opened in binary mode.
 - Fixed `vec_npy_file()` rejecting numpy files larger than 2 GiB on Windows. File positions now use 64-bit APIs instead of Windows' 32-bit `long`.
+- Fixed a crash when `vec0` could not prepare the statement that finds a row's chunk, as when the `_rowids` shadow table is missing or `sqlite3_interrupt()` interrupts the query. Point queries, `UPDATE`, `DELETE`, `INSERT OR REPLACE`, `optimize`, MMR reranking, and queries that return a vector, partition key, metadata, or text primary key column prepare it on first use and again after each transaction that writes to the table, and `vec0` called `sqlite3_clear_bindings()` on the NULL statement when that failed. Such a query now fails instead of crashing; with the `_rowids` table missing, a point query on a rowid, for example, fails with `Internal sqlite-vec error: could not initialize 'rowids get chunk position' statement`.
 
 ### Infrastructure
 

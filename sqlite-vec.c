@@ -4191,8 +4191,10 @@ int vec0_get_chunk_position(vec0_vtab *p, i64 rowid, sqlite3_value **id,
   rc = SQLITE_OK;
 
 cleanup:
-  sqlite3_reset(p->stmtRowidsGetChunkPosition);
-  sqlite3_clear_bindings(p->stmtRowidsGetChunkPosition);
+  if (p->stmtRowidsGetChunkPosition) {
+    sqlite3_reset(p->stmtRowidsGetChunkPosition);
+    sqlite3_clear_bindings(p->stmtRowidsGetChunkPosition);
+  }
   return rc;
 }
 

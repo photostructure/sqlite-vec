@@ -305,3 +305,13 @@ def test_rowids_shadow_insert_reports_real_error(db):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_point_query_reports_unpreparable_rowid_lookup(db):
+    # vec0 prepares its rowid-to-chunk lookup on first use, and called
+    # sqlite3_clear_bindings() on the NULL statement when that prepare failed.
+    db.execute("CREATE VIRTUAL TABLE test USING vec0(v float[1])")
+    db.execute("INSERT INTO test(rowid, v) VALUES (1, '[1]')")
+    db.execute("DROP TABLE test_rowids")
+    with _raises("could not initialize 'rowids get chunk position' statement"):
+        db.execute("SELECT * FROM test WHERE rowid = 1").fetchall()
