@@ -253,9 +253,12 @@ result in precision loss for very small distance differences.
 #### `VEC0_IDXSTR_KIND_KNN_MMR_LAMBDA` (`'#'`)
 
 `argv[i]` is the value of the optional `mmr_lambda = ?` constraint of a KNN
-query. Unless `k` is 0, `vec0Filter_knn` reads it with `sqlite3_value_double()`,
-converts it to `f32`, and fails the query if it is below 0.0 or above 1.0. For
-a value below 1.0, it fetches the `k * 5` nearest rows (at most 4096) and, if
-it finds more than `k`, selects `k` of them by MMR.
+query. Unless `k` is 0, `vec0Filter_knn` applies numeric affinity to it with
+`sqlite3_value_numeric_type()`, as SQLite does to a `LIMIT` value, and fails
+the query unless it is then an INTEGER or REAL: `'0.5'` reads as 0.5, and NULL,
+a blob, or text such as `'abc'` fails. It converts the number to `f32` and
+fails the query if it is below 0.0 or above 1.0. For a value below 1.0, it
+fetches the `k * 5` nearest rows (at most 4096) and, if it finds more than
+`k`, selects `k` of them by MMR.
 
 The remaining 3 characters of the block are `_` fillers.

@@ -8521,6 +8521,16 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
   f32 mmr_lambda = -1.0f;
   i64 k_original = k;
   if (mmr_lambda_idx >= 0) {
+    // numeric affinity, as SQLite applies to LIMIT, so '0.5' is 0.5
+    int mmr_lambda_type = sqlite3_value_numeric_type(argv[mmr_lambda_idx]);
+    if (mmr_lambda_type != SQLITE_INTEGER && mmr_lambda_type != SQLITE_FLOAT) {
+      vtab_set_error(&p->base,
+                     "mmr_lambda value in knn query must be a number between "
+                     "0.0 and 1.0, provided %s",
+                     type_name(mmr_lambda_type));
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
     mmr_lambda = (f32)sqlite3_value_double(argv[mmr_lambda_idx]);
     if (mmr_lambda < 0.0f || mmr_lambda > 1.0f) {
       vtab_set_error(

@@ -1,5 +1,8 @@
+import re
 import sqlite3
 from collections import OrderedDict
+
+import pytest
 
 
 def test_mmr_cosine_diversity(db, snapshot):
@@ -198,6 +201,62 @@ def test_mmr_error_invalid_lambda(db, snapshot):
     assert (
         exec(db, BASE_KNN + " and mmr_lambda = ?", ["[1,0,0]", 1, -0.1]) == snapshot()
     )
+
+
+@pytest.mark.parametrize(
+    "value, type_name",
+    [
+        (None, "NULL"),
+        ("abc", "TEXT"),
+        ("", "TEXT"),
+        ("0.5abc", "TEXT"),
+        (b"\x00", "BLOB"),
+        (b"0.5", "BLOB"),
+    ],
+)
+def test_mmr_error_non_numeric_lambda(db, value, type_name):
+    """A non-numeric mmr_lambda fails the query instead of being read as 0.0."""
+    db.execute(
+        "create virtual table v using vec0(embedding float[3] distance_metric=cosine)"
+    )
+    db.execute("insert into v(rowid, embedding) values (1, '[1,0,0]')")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "mmr_lambda value in knn query must be a number between 0.0 and 1.0, "
+            f"provided {type_name}"
+        ),
+    ):
+        db.execute(
+            "select rowid from v where embedding match '[1,0,0]' and k = 1 and mmr_lambda = ?",
+            [value],
+        ).fetchall()
+
+
+def test_mmr_numeric_text_lambda(db):
+    """mmr_lambda accepts numeric text, as k accepts '5'."""
+    db.execute(
+        "create virtual table v using vec0(embedding float[3] distance_metric=cosine)"
+    )
+    db.executemany(
+        "insert into v(rowid, embedding) values (?, ?)",
+        [
+            [1, "[1,0,0]"],
+            [2, "[0.99,0.1,0]"],
+            [3, "[0.98,0.2,0]"],
+            [4, "[0,1,0]"],
+            [5, "[0,0,1]"],
+        ],
+    )
+
+    KNN = "select rowid from v where embedding match '[1,0,0]' and k = 3 and mmr_lambda = ?"
+
+    def rowids(value):
+        return [row[0] for row in db.execute(KNN, [value])]
+
+    for text, number in [("0.5", 0.5), (" 0.5", 0.5), ("1e0", 1.0), ("0", 0.0)]:
+        assert rowids(text) == rowids(number)
 
 
 def test_mmr_insert_guard(db, snapshot):

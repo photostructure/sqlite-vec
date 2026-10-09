@@ -30,6 +30,7 @@
 - Creating a `vec0` table with two primary key columns now fails with `More than one primary key definition was provided, vec0 only supports a single primary key column`; the message used to say "suports".
 - Inserting a value of the wrong type into a `vec0` partition key column now fails with `Partition key type mismatch: ...`; the message used to say "Parition".
 - A KNN query with a metadata filter that fails after the search has run, for example when a progress handler interrupts it between rows, now reports that error's own message, such as `interrupted`. It used to report `Could not open metadata blob`, which the filter set even when the blob opened.
+- A KNN query whose `mmr_lambda` value is not a number now fails with `mmr_lambda value in knn query must be a number between 0.0 and 1.0, provided NULL` (or `TEXT` or `BLOB`). It used to run MMR with NULL, `''`, `'abc'`, or `x'00'` read as 0.0 and with `'0.5abc'` or `x'302e35'` read as 0.5, so `mmr_lambda = ?` bound to NULL returned the rows of `mmr_lambda = 0.0`. Numeric text such as `'0.5'` or `' 0.5'` is still read as 0.5: `vec0` converts text to a number the way SQLite converts a `LIMIT` value such as `' 5'`.
 
 ### Removed
 
