@@ -2702,6 +2702,37 @@ def test_vec0_knn():
     db.rollback()
 
 
+def test_vec0_knn_skips_vectors_of_filtered_out_chunks():
+    # A KNN query reads a chunk's vectors only if its rowid and metadata
+    # filters keep a row in that chunk. A corrupt vectors blob shows whether
+    # the chunk was read.
+    db = connect(EXT_PATH)
+    db.execute("create virtual table v using vec0(a float[2], n integer, chunk_size=8)")
+    # rowids 1-8 fill the first chunk with n = 0, rowids 9-16 the second with n = 1
+    db.executemany(
+        "insert into v(rowid, a, n) values (?, ?, ?)",
+        [(i, json.dumps([i, 0]), 0 if i <= 8 else 1) for i in range(1, 17)],
+    )
+    db.execute(
+        "update v_vector_chunks00 set vectors = zeroblob(4) where rowid = (select min(chunk_id) from v_chunks)"
+    )
+    knn = "select rowid from v where a match '[0, 0]' and k = 3"
+
+    assert execute_all(db, knn + " and n = 1") == [
+        {"rowid": 9},
+        {"rowid": 10},
+        {"rowid": 11},
+    ]
+    assert execute_all(db, knn + " and rowid in (9, 10)") == [
+        {"rowid": 9},
+        {"rowid": 10},
+    ]
+    with _raises("vectors blob size doesn't match - expected 64, found 4"):
+        db.execute(knn)
+    with _raises("vectors blob size doesn't match - expected 64, found 4"):
+        db.execute(knn + " and n = 0")
+
+
 import numpy.typing as npt
 
 
