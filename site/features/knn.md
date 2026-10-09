@@ -1,9 +1,10 @@
 # KNN queries
 
 The most common use-case for vectors in databases is for K-nearest-neighbors (KNN) queries.
-You'll have a table of vectors, and you'll want to find the K closest
+You'll have a table of vectors, and you'll want to find the K vectors closest
+to a query vector.
 
-Currently there are two ways to to perform KNN queries with `sqlite-vec`:
+Currently there are two ways to perform KNN queries with `sqlite-vec`:
 With `vec0` virtual tables and "manually" with regular tables.
 
 The `vec0` virtual table is faster and more compact, but is less flexible and requires `JOIN`s back to your source tables.
@@ -174,7 +175,7 @@ is highly selective.
 
 ### Auxiliary columns cannot filter KNN
 
-[Auxiliary columns](./vec0.md) (declared with `+` prefix) store data but are not indexed.
+[Auxiliary columns](./vec0.md#aux) (declared with `+` prefix) store data but are not indexed.
 They cannot be used in KNN `WHERE` clauses:
 
 ```sql
