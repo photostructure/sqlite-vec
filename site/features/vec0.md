@@ -24,11 +24,11 @@ create virtual table vec_chunks using vec0(
 
 A quick summary of each option:
 
-| Column Type       | Description                                                             | Benefits                                             | Limitations                                                                                                           |
-| ----------------- | ----------------------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Metadata columns  | Stores boolean, integer, floating point, or text data alongside vectors | Can be included in the `WHERE` clause of a KNN query | Slower full scan, slightly inefficient with long strings (`> 12` characters)                                          |
-| Auxiliary columns | Stores any kind of data in a separate internal table                    | Eliminates need for an external `JOIN`               | Cannot appear in the `WHERE` clause of a KNN query                                                                    |
-| Partition Key     | Internally shards vector index on a given key                           | Make selective queries much faster                   | Can cause oversharding and slow KNN if not used carefully. Should be +100's of vectors per unique partition key value |
+| Column Type       | Description                                                             | Benefits                                             | Limitations                                                                                                               |
+| ----------------- | ----------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Metadata columns  | Stores boolean, integer, floating point, or text data alongside vectors | Can be included in the `WHERE` clause of a KNN query | Slower full scan, slightly inefficient with long strings (`> 12` characters)                                              |
+| Auxiliary columns | Stores any kind of data in a separate internal table                    | Eliminates need for an external `JOIN`               | Cannot appear in the `WHERE` clause of a KNN query                                                                        |
+| Partition Key     | Internally shards vector index on a given key                           | Makes selective queries much faster                  | Can cause oversharding and slow KNN if not used carefully. Should have hundreds of vectors per unique partition key value |
 
 ### Metadata Columns {#metadata}
 
@@ -152,7 +152,7 @@ column itself, as for an ordinary table.
 
 ### Partition Key Columns {#partition-keys}
 
-Partition key columns allow one to internally shard a vector indexed based on a
+Partition key columns allow one to internally shard a vector index based on a
 given key. In a KNN query, an `=`, `!=`, `<`, `<=`, `>`, `>=`, or `BETWEEN`
 condition on a partition key column restricts the search to the partitions
 whose key satisfies it. When `vec0` uses such a condition on a `text` key, it
@@ -241,7 +241,7 @@ Auxiliary columns are denoted by a `+` prefix in their column definition, like
 so:
 
 ```sql
-create virtual table vec_chunks using vec0(
+create virtual table vec_text_chunks using vec0(
   contents_embedding float[1024],
   +contents text
 );
@@ -250,7 +250,7 @@ select
   rowid,
   contents,
   distance
-from vec_chunks
+from vec_text_chunks
 where contents_embedding match :query
   and k = 10;
 ```
