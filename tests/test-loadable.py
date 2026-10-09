@@ -2913,18 +2913,6 @@ def test_vec0_create_errors():
     db.set_authorizer(None)
     db.rollback()
 
-    # TODO wut
-    # db.commit()
-    # db.execute("BEGIN")
-    # db.set_authorizer(authorizer_deny_on(sqlite3.SQLITE_UPDATE, "t1_rowids", "id"))
-    # with _raises(
-    #    "Internal sqlite-vec error: could not initialize 'rowids get chunk position' statement", sqlite3.DatabaseError
-    # ):
-    #    db.execute("create virtual table t1 using vec0(a float[1])")
-    #    db.execute("insert into t1(a) values (X'AABBCCDD')")
-    # db.set_authorizer(None)
-    # db.rollback()
-
 
 def test_vec0_knn():
     db = connect(EXT_PATH)
