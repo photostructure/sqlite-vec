@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.1] - 2026-10-09
+
+Opens tables whose vector column definition 2.0.2 accepted, which 2.1.0 failed to open. 2.1.0 was not published to npm, so 2.1.1 is the first npm release with 2.1.0's changes; read 2.1.0's notes before upgrading from 2.0.2.
 
 ### Fixed
 
