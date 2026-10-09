@@ -5832,7 +5832,7 @@ typedef enum {
   // ~~~ POINT QUERIES ~~~ //
   VEC0_IDXSTR_KIND_POINT_ID = '!',
 
-  // ~~~ ??? ~~~ //
+  // ~~~ KNN QUERIES, continued ~~~ //
   VEC0_IDXSTR_KIND_METADATA_CONSTRAINT = '&',
   VEC0_IDXSTR_KIND_KNN_MMR_LAMBDA = '#',
 } vec0_idxstr_kind;
