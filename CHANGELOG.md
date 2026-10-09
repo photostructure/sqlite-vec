@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.0] - 2026-10-08
+
+KNN filters on metadata columns, rowids, and text primary keys now compare a bound value or literal the way a plain scan of the same `vec0` table does: `vec0` declares metadata and text primary key columns without a type, so `t = 5` no longer matches `'5'`, and it declares the rowid `INTEGER`. Text metadata filters honor `COLLATE NOCASE` and `RTRIM`. More filters now restrict the rows a KNN query picks its k nearest from (`rowid = ?`, and partition key `IN`, `IS`, `LIKE`, and `GLOB`), and a KNN query skips the vectors of chunks its filters exclude. This release ports `INSERT OR REPLACE` and four unmerged upstream pull requests, and fixes crashes and out-of-bounds reads and writes in KNN text filters, `vec_npy_each` and `vec_npy_file()`, statements whose chunk lookup fails to prepare (as when `sqlite3_interrupt()` stops one or the `_rowids` shadow table is missing), and a failed `DROP TABLE`. Some statements that used to succeed now fail, for example: a `float32` vector containing NaN or Inf, including a stored one passed to a SQL function; an `UPDATE` that changes a `vec0` key; a `CREATE VIRTUAL TABLE` with a partial keyword or extra tokens in a column definition; a KNN query with a non-integer `k` or a non-numeric `mmr_lambda`; and a KNN `=`, `IS`, range, or `IN` filter on a `text` metadata column with a collation other than `BINARY`, `NOCASE`, or `RTRIM`. Tables created by earlier releases still open. Cosine distances can differ from 2.0.2 in the last few digits. Read `### Changed` and `### Fixed` before upgrading.
 
 ### Added
 
