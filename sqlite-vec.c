@@ -9019,6 +9019,10 @@ static int vec0Column_fullscan(vec0_vtab *pVtab, vec0_cursor *pCur,
   if (i == VEC0_COLUMN_ID) {
     return vec0_result_id(pVtab, context, rowid);
   } else if (vec0_column_idx_is_vector(pVtab, i)) {
+    if (sqlite3_vtab_nochange(context)) {
+      sqlite3_result_null(context);
+      return SQLITE_OK;
+    }
     void *v;
     int sz;
     int vector_idx = vec0_column_idx_to_vector_idx(pVtab, i);
@@ -9181,6 +9185,10 @@ static int vec0Column_knn(vec0_vtab *pVtab, vec0_cursor *pCur,
         context, pCur->knn_data->distances[pCur->knn_data->current_idx]);
     return SQLITE_OK;
   } else if (vec0_column_idx_is_vector(pVtab, i)) {
+    if (sqlite3_vtab_nochange(context)) {
+      sqlite3_result_null(context);
+      return SQLITE_OK;
+    }
     void *out;
     int sz;
     int vector_idx = vec0_column_idx_to_vector_idx(pVtab, i);

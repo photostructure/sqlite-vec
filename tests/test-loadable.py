@@ -2261,6 +2261,52 @@ def test_vec0_update_partitioned_table():
                 ], where
 
 
+def test_vec0_update_keeps_int8_bit_vectors():
+    # An UPDATE that does not set an int8 or bit vector column changes the rows
+    # its WHERE selects and leaves their vectors unchanged through the full-scan
+    # (1), KNN (3), and point (2) plans.
+    for column, to_vector in [
+        ("a int8[4]", lambda i: f"vec_int8('[{i}, {-i}, {2 * i}, 0]')"),
+        ("a bit[8]", lambda i: f"vec_bit(x'{i:02x}')"),
+    ]:
+        for where, plan in [
+            ("m = 2", "1"),
+            (f"a match {to_vector(1)} and k = 3", "3"),
+            ("rowid = 2", "2"),
+        ]:
+            db = connect(EXT_PATH)
+            db.execute(
+                f"create virtual table v using vec0({column}, m integer, +x text, chunk_size=8)"
+            )
+            for i in range(1, 11):
+                db.execute(
+                    f"insert into v(rowid, a, m, x) values ({i}, {to_vector(i)}, {i % 3}, 'x{i}')"
+                )
+
+            def rows():
+                return [
+                    tuple(row)
+                    for row in db.execute(
+                        "select rowid, hex(a), m, x from v order by rowid"
+                    )
+                ]
+
+            detail = explain_query_plan(f"update v set m = 99 where {where}", db)
+            assert re.search(r"INDEX -?\d+:(\d)", detail)[1] == plan, detail
+
+            before = rows()
+            selected = [
+                row[0] for row in db.execute(f"select rowid from v where {where}")
+            ]
+            assert len(selected) > 0
+            changes = db.execute(f"update v set m = 99, x = 'u' where {where}").rowcount
+            assert changes == len(selected), (column, where)
+            assert rows() == [
+                (row[0], row[1], 99, "u") if row[0] in selected else row
+                for row in before
+            ], (column, where)
+
+
 def test_vec0_best_index():
     db = connect(EXT_PATH)
     db.execute("""
