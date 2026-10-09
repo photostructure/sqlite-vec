@@ -5862,6 +5862,15 @@ typedef enum {
 
   // "Not equal to" constraint on a PARTITON KEY column, ex `year != 2024`
   VEC0_PARTITION_OPERATOR_NE = 'f',
+
+  // `user_id in (...)`, whose values are read with sqlite3_vtab_in_first()
+  VEC0_PARTITION_OPERATOR_IN = 'g',
+  VEC0_PARTITION_OPERATOR_LIKE = 'h',
+  VEC0_PARTITION_OPERATOR_GLOB = 'i',
+  VEC0_PARTITION_OPERATOR_IS = 'j',
+  VEC0_PARTITION_OPERATOR_ISNOT = 'k',
+  VEC0_PARTITION_OPERATOR_ISNULL = 'l',
+  VEC0_PARTITION_OPERATOR_ISNOTNULL = 'm',
 } vec0_partition_operator;
 typedef enum {
   VEC0_METADATA_OPERATOR_EQ = 'a',
@@ -6090,10 +6099,24 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
 
       int partition_idx = vec0_column_idx_to_partition_idx(p, iColumn);
       char value = 0;
+      int omit = 1;
+      // vec0 compares partition keys bytewise. An IN or IS that names another
+      // collation keeps the handling it had before vec0 consumed them: an IN
+      // stays an `=` that SQLite runs once per value, and SQLite applies an IS
+      // to the rows vec0 returns.
+      int isBinary =
+          sqlite3_stricmp(sqlite3_vtab_collation(pIdxInfo, i), "BINARY") == 0;
 
       switch (op) {
       case SQLITE_INDEX_CONSTRAINT_EQ: {
         value = VEC0_PARTITION_OPERATOR_EQ;
+#if COMPILER_SUPPORTS_VTAB_IN
+        if (isBinary && sqlite3_libversion_number() >= 3038000 &&
+            sqlite3_vtab_in(pIdxInfo, i, -1)) {
+          sqlite3_vtab_in(pIdxInfo, i, 1);
+          value = VEC0_PARTITION_OPERATOR_IN;
+        }
+#endif
         break;
       }
       case SQLITE_INDEX_CONSTRAINT_GT: {
@@ -6116,11 +6139,40 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
         value = VEC0_PARTITION_OPERATOR_NE;
         break;
       }
+      case SQLITE_INDEX_CONSTRAINT_LIKE: {
+        value = VEC0_PARTITION_OPERATOR_LIKE;
+        break;
+      }
+      case SQLITE_INDEX_CONSTRAINT_GLOB: {
+        value = VEC0_PARTITION_OPERATOR_GLOB;
+        break;
+      }
+      case SQLITE_INDEX_CONSTRAINT_IS: {
+        if (isBinary) {
+          value = VEC0_PARTITION_OPERATOR_IS;
+        }
+        break;
+      }
+      case SQLITE_INDEX_CONSTRAINT_ISNOT: {
+        value = VEC0_PARTITION_OPERATOR_ISNOT;
+        // SQLite reports BINARY for IS NOT whatever collation the query names,
+        // so vec0 compares bytewise and SQLite re-checks each row
+        omit = 0;
+        break;
+      }
+      case SQLITE_INDEX_CONSTRAINT_ISNULL: {
+        value = VEC0_PARTITION_OPERATOR_ISNULL;
+        break;
+      }
+      case SQLITE_INDEX_CONSTRAINT_ISNOTNULL: {
+        value = VEC0_PARTITION_OPERATOR_ISNOTNULL;
+        break;
+      }
       }
 
       if (value) {
         pIdxInfo->aConstraintUsage[i].argvIndex = argvIndex++;
-        pIdxInfo->aConstraintUsage[i].omit = 1;
+        pIdxInfo->aConstraintUsage[i].omit = omit;
         sqlite3_str_appendchar(idxStr, 1,
                                VEC0_IDXSTR_KIND_KNN_PARTITON_CONSTRAINT);
         sqlite3_str_appendchar(idxStr, 1, 'A' + partition_idx);
@@ -6662,6 +6714,42 @@ int vec0_chunks_iter(vec0_vtab *p, const char *idxStr, int argc,
     case VEC0_PARTITION_OPERATOR_NE:
       sqlite3_str_appendf(s, " partition%02d != ? ", partition_idx);
       break;
+#if COMPILER_SUPPORTS_VTAB_IN
+    case VEC0_PARTITION_OPERATOR_IN: {
+      // one parameter per value, bound below
+      sqlite3_str_appendf(s, " partition%02d IN (", partition_idx);
+      sqlite3_value *item;
+      int nItems = 0;
+      for (rc = sqlite3_vtab_in_first(argv[i], &item); rc == SQLITE_OK && item;
+           rc = sqlite3_vtab_in_next(argv[i], &item)) {
+        sqlite3_str_appendall(s, nItems++ ? ", ?" : "?");
+      }
+      if (rc != SQLITE_DONE) {
+        sqlite3_free(sqlite3_str_finish(s));
+        return rc;
+      }
+      sqlite3_str_appendall(s, ") ");
+      break;
+    }
+#endif
+    case VEC0_PARTITION_OPERATOR_LIKE:
+      sqlite3_str_appendf(s, " partition%02d LIKE ? ", partition_idx);
+      break;
+    case VEC0_PARTITION_OPERATOR_GLOB:
+      sqlite3_str_appendf(s, " partition%02d GLOB ? ", partition_idx);
+      break;
+    case VEC0_PARTITION_OPERATOR_IS:
+      sqlite3_str_appendf(s, " partition%02d IS ? ", partition_idx);
+      break;
+    case VEC0_PARTITION_OPERATOR_ISNOT:
+      sqlite3_str_appendf(s, " partition%02d IS NOT ? ", partition_idx);
+      break;
+    case VEC0_PARTITION_OPERATOR_ISNULL:
+      sqlite3_str_appendf(s, " partition%02d IS NULL ", partition_idx);
+      break;
+    case VEC0_PARTITION_OPERATOR_ISNOTNULL:
+      sqlite3_str_appendf(s, " partition%02d IS NOT NULL ", partition_idx);
+      break;
     default: {
       char *zSql = sqlite3_str_finish(s);
       sqlite3_free(zSql);
@@ -6688,7 +6776,27 @@ int vec0_chunks_iter(vec0_vtab *p, const char *idxStr, int argc,
     if (kind != VEC0_IDXSTR_KIND_KNN_PARTITON_CONSTRAINT) {
       continue;
     }
-    sqlite3_bind_value(*outStmt, n++, argv[i]);
+    switch (idxStr[idx + 2]) {
+#if COMPILER_SUPPORTS_VTAB_IN
+    case VEC0_PARTITION_OPERATOR_IN: {
+      sqlite3_value *item;
+      for (rc = sqlite3_vtab_in_first(argv[i], &item); rc == SQLITE_OK && item;
+           rc = sqlite3_vtab_in_next(argv[i], &item)) {
+        sqlite3_bind_value(*outStmt, n++, item);
+      }
+      if (rc != SQLITE_DONE) {
+        return rc;
+      }
+      rc = SQLITE_OK;
+      break;
+    }
+#endif
+    case VEC0_PARTITION_OPERATOR_ISNULL:
+    case VEC0_PARTITION_OPERATOR_ISNOTNULL:
+      break;
+    default:
+      sqlite3_bind_value(*outStmt, n++, argv[i]);
+    }
   }
 
   return rc;

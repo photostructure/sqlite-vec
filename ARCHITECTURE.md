@@ -176,8 +176,44 @@ using `A` to denote the first partition key column, `B` for the second, etc. It
 is encoded with `'A' + partition_idx` and can be decoded with `c - 'A'`.
 
 The third character of the block denotes which operator is used in the
-constraint. It will be one of the values of `enum vec0_partition_operator`, as
-only a subset of operations are supported on partition keys.
+constraint. It will be one of the values of `enum vec0_partition_operator`.
+`vec0_chunks_iter()` turns each block into a condition on the `_chunks`
+table's `partitionNN` column:
+
+| Operator    | Value | Condition                 |
+| ----------- | ----- | ------------------------- |
+| `EQ`        | `'a'` | `partitionNN = ?`         |
+| `GT`        | `'b'` | `partitionNN > ?`         |
+| `LE`        | `'c'` | `partitionNN <= ?`        |
+| `LT`        | `'d'` | `partitionNN < ?`         |
+| `GE`        | `'e'` | `partitionNN >= ?`        |
+| `NE`        | `'f'` | `partitionNN != ?`        |
+| `IN`        | `'g'` | `partitionNN IN (?, ...)` |
+| `LIKE`      | `'h'` | `partitionNN LIKE ?`      |
+| `GLOB`      | `'i'` | `partitionNN GLOB ?`      |
+| `IS`        | `'j'` | `partitionNN IS ?`        |
+| `ISNOT`     | `'k'` | `partitionNN IS NOT ?`    |
+| `ISNULL`    | `'l'` | `partitionNN IS NULL`     |
+| `ISNOTNULL` | `'m'` | `partitionNN IS NOT NULL` |
+
+`argv[i]` of an `IN` block is read with `sqlite3_vtab_in_first()` /
+`sqlite3_vtab_in_next()`, and each of its values is bound to its own parameter
+of the `_chunks` query, so the query fails to prepare when the distinct values
+of its `IN` blocks and its other partition key values together number more
+than `SQLITE_LIMIT_VARIABLE_NUMBER`. `ISNULL` and `ISNOTNULL` blocks bind nothing.
+
+These conditions compare text with `BINARY` (`LIKE` and `GLOB` keep their own
+case rules, and `LIKE` follows `PRAGMA case_sensitive_like`), and they see only
+`argv[i]`'s value, not the affinity of the expression that produced it, so
+`p IS CAST(5 AS INTEGER)` does not match a text `'5'`. `EQ`, `NE`, and the
+range operators are encoded whatever collation the query names. An `IN` or
+`IS` constraint is encoded as such only when `sqlite3_vtab_collation()`
+reports `BINARY`: an `IN` with another collation is encoded as `EQ`, which
+SQLite runs once per value that is distinct under that collation, as before
+`vec0` encoded `IN`, and an `IS` with
+another collation is left to SQLite. SQLite reports `BINARY` for `IS NOT`
+whatever collation the query names, so `xBestIndex` leaves `omit` unset for it
+and SQLite re-checks each row.
 
 The fourth character of the block is a `_` filler.
 

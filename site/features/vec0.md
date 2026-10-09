@@ -153,11 +153,53 @@ column itself, as for an ordinary table.
 ### Partition Key Columns {#partition-keys}
 
 Partition key columns allow one to internally shard a vector index based on a
-given key. In a KNN query, an `=`, `!=`, `<`, `<=`, `>`, `>=`, or `BETWEEN`
+given key. In a KNN query, an `=`, `!=`, `<`, `<=`, `>`, `>=`, `BETWEEN`,
+`IN (...)`, `IS`, `IS NOT`, `IS NULL`, `IS NOT NULL`, `LIKE`, or `GLOB`
 condition on a partition key column restricts the search to the partitions
-whose key satisfies it. When `vec0` uses such a condition on a `text` key, it
-compares bytewise and ignores any `COLLATE` clause, so
+whose key satisfies it, except in the forms listed below. `LIKE` and `GLOB`
+match as in SQLite, and `LIKE` follows `PRAGMA case_sensitive_like`.
+
+When `vec0` uses an `=`, `!=`, `<`, `<=`, `>`, `>=`, or `BETWEEN` condition on
+a `text` key, it compares bytewise and ignores any `COLLATE` clause, so
 `name = 'alice' collate nocase` does not search a partition keyed `'Alice'`.
+`vec0` uses an `IN` condition that names a collation other than `BINARY`, such
+as `name collate nocase in ('alice', 'bob')`, only as one bytewise `=` per
+value: it searches the `'alice'` and `'bob'` partitions one at a time and
+returns up to `k` rows from each, and the query fails if it uses `LIMIT`
+instead of `k = ?`. SQLite first keeps only one of the values that the
+collation treats as equal, so `name collate nocase in ('alice', 'Alice')`
+searches only one of those two partitions. An `IS NOT` condition with `COLLATE` on the value, as in
+`name is not 'alice' collate nocase`, can return fewer than `k` rows, because
+`vec0` compares it bytewise and SQLite drops each returned row that equals the
+value under that collation.
+
+`vec0` binds each distinct value of an `IN` list or `IN (select ...)` as its
+own SQL parameter, so the query fails with
+`Error preparing stmtChunk: too many SQL variables` when those distinct values
+and the query's other partition key values number more than SQLite's host
+parameter limit (32766 by default). An `IN` that names a collation other than
+`BINARY` runs once per distinct value and has no such limit.
+
+SQLite does not pass some conditions on partition key columns to `vec0`, or
+`vec0` does not use them, and SQLite instead applies them to the `k` rows that
+`vec0` returns. A KNN query with such a condition can return fewer than `k`
+rows, and if it uses `LIMIT` instead of `k = ?`, it fails with
+`A LIMIT or 'k = ?' constraint is required on vec0 knn queries.` These
+conditions include:
+
+- `IS` with a collation other than `BINARY`, as in
+  `name is 'alice' collate nocase`
+- `!=` and `IS NOT` with `COLLATE` on the column, as in
+  `name collate nocase != 'alice'`
+- `NOT IN`, `NOT LIKE`, and `NOT GLOB`
+- `LIKE ... ESCAPE`. For some patterns that begin with literal text, such as
+  `'a!_%' escape '!'`, SQLite also passes `vec0` range conditions, which `vec0`
+  compares bytewise, so the query can return fewer than `k` rows even with
+  `LIMIT`, without an error.
+- `IS TRUE`, `IS FALSE`, `IS NOT TRUE`, and `IS NOT FALSE`
+- conditions joined with `OR`, except `=` conditions on one column, which
+  SQLite turns into `IN`
+- conditions on an expression, such as `lower(name) = 'alice'`
 
 For example, say you're performing vector search on a large dataset of
 documents. However, each document belongs to a user, and users can only search
