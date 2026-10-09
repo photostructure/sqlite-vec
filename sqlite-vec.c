@@ -4157,7 +4157,8 @@ static int vec0_interrupt_result(sqlite3_vtab *pVTab, int rc) {
  *            Useful for text PK rows. Must be freed with sqlite3_value_free()
  * @param chunk_id output, the chunk_id the row belongs to
  * @param chunk_offset  output, the offset within the chunk the row belongs to
- * @return SQLITE_ROW on success, error code otherwise. SQLITE_EMPTY if row DNE
+ * @return SQLITE_OK on success, SQLITE_EMPTY if the row does not exist, error
+ * code otherwise
  */
 int vec0_get_chunk_position(vec0_vtab *p, i64 rowid, sqlite3_value **id,
                             i64 *chunk_id, i64 *chunk_offset) {
