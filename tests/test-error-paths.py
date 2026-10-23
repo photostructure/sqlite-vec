@@ -417,6 +417,17 @@ def interrupt_template():
         "INSERT INTO vt(id, vector) VALUES (?, ?)",
         [(f"id{i}", f"[{i}, {i % 3}]") for i in range(1, 9)],
     )
+    # vr is indexed by rescore(). Its first chunk has a deleted row for optimize
+    # to skip, and rowid 9 is the only row of its second chunk.
+    db.execute(
+        "CREATE VIRTUAL TABLE vr USING vec0(vector float[2] indexed by "
+        "rescore(quantizer=int8), +a text, chunk_size=8)"
+    )
+    db.executemany(
+        "INSERT INTO vr(rowid, vector, a) VALUES (?, ?, ?)",
+        [(i, f"[{i / 10}, {i % 3 / 10}]", f"aux {i}") for i in range(1, 10)],
+    )
+    db.execute("DELETE FROM vr WHERE rowid = 2")
     db.commit()
     return db.serialize()
 
@@ -504,6 +515,27 @@ def _run_interrupted(template, sql, n, mode):
         pytest.param("DELETE FROM vt WHERE id = 'id4'", id="delete-text-pk"),
         pytest.param("DELETE FROM vp WHERE rowid = 4", id="delete-emptying-chunk"),
         pytest.param("INSERT INTO vp(vp) VALUES ('optimize')", id="optimize"),
+        pytest.param(
+            "SELECT rowid, distance, a FROM vr WHERE vector MATCH '[0.3, 0.4]' "
+            "AND k = 3 AND distance < 10",
+            id="knn-rescore",
+        ),
+        pytest.param("SELECT rowid, vector, a FROM vr", id="fullscan-rescore"),
+        pytest.param(
+            "SELECT rowid, vector, a FROM vr WHERE rowid = 4", id="point-rescore"
+        ),
+        pytest.param(
+            "INSERT INTO vr(rowid, vector, a) VALUES (100, '[0.1, 0.1]', 'x')",
+            id="insert-rescore",
+        ),
+        pytest.param(
+            "UPDATE vr SET vector = '[0.9, 0.9]' WHERE rowid = 4", id="update-rescore"
+        ),
+        pytest.param("DELETE FROM vr WHERE rowid = 4", id="delete-rescore"),
+        pytest.param(
+            "DELETE FROM vr WHERE rowid = 9", id="delete-emptying-rescore-chunk"
+        ),
+        pytest.param("INSERT INTO vr(vr) VALUES ('optimize')", id="optimize-rescore"),
     ],
 )
 def test_interrupt_is_reported_as_interrupt(interrupt_template, sql, mode):
