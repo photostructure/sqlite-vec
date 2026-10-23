@@ -169,6 +169,200 @@
     }),
   })
 # ---
+# name: test_diskann_aux_insert_knn[diskann aux select all]
+  OrderedDict({
+    'sql': 'SELECT rowid, label FROM t ORDER BY rowid',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'label': 'red',
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'label': 'green',
+      }),
+      OrderedDict({
+        'rowid': 3,
+        'label': 'blue',
+      }),
+    ]),
+  })
+# ---
+# name: test_diskann_aux_insert_knn[diskann aux shadow contents]
+  dict({
+    't_auxiliary': OrderedDict({
+      'sql': 'select * from t_auxiliary',
+      'rows': list([
+        OrderedDict({
+          'rowid': 1,
+          'value00': 'red',
+        }),
+        OrderedDict({
+          'rowid': 2,
+          'value00': 'green',
+        }),
+        OrderedDict({
+          'rowid': 3,
+          'value00': 'blue',
+        }),
+      ]),
+    }),
+    't_chunks': OrderedDict({
+      'sql': 'select * from t_chunks',
+      'rows': list([
+      ]),
+    }),
+    't_diskann_buffer00': OrderedDict({
+      'sql': 'select * from t_diskann_buffer00',
+      'rows': list([
+      ]),
+    }),
+    't_diskann_nodes00': OrderedDict({
+      'sql': 'select * from t_diskann_nodes00',
+      'rows': list([
+        OrderedDict({
+          'rowid': 1,
+          'neighbors_validity': b'\x03',
+          'neighbor_ids': b'\x02\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+          'neighbor_quantized_vectors': b'\x02\x04\x00\x00\x00\x00\x00\x00',
+        }),
+        OrderedDict({
+          'rowid': 2,
+          'neighbors_validity': b'\x03',
+          'neighbor_ids': b'\x01\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+          'neighbor_quantized_vectors': b'\x01\x04\x00\x00\x00\x00\x00\x00',
+        }),
+        OrderedDict({
+          'rowid': 3,
+          'neighbors_validity': b'\x03',
+          'neighbor_ids': b'\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+          'neighbor_quantized_vectors': b'\x01\x02\x00\x00\x00\x00\x00\x00',
+        }),
+      ]),
+    }),
+    't_rowids': OrderedDict({
+      'sql': 'select * from t_rowids',
+      'rows': list([
+        OrderedDict({
+          'rowid': 1,
+          'id': None,
+          'chunk_id': None,
+          'chunk_offset': None,
+        }),
+        OrderedDict({
+          'rowid': 2,
+          'id': None,
+          'chunk_id': None,
+          'chunk_offset': None,
+        }),
+        OrderedDict({
+          'rowid': 3,
+          'id': None,
+          'chunk_id': None,
+          'chunk_offset': None,
+        }),
+      ]),
+    }),
+    't_vectors00': OrderedDict({
+      'sql': 'select * from t_vectors00',
+      'rows': list([
+        OrderedDict({
+          'rowid': 1,
+          'vector': b'\x00\x00\x80?\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+        }),
+        OrderedDict({
+          'rowid': 2,
+          'vector': b'\x00\x00\x00\x00\x00\x00\x80?\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+        }),
+        OrderedDict({
+          'rowid': 3,
+          'vector': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80?\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+        }),
+      ]),
+    }),
+  })
+# ---
+# name: test_diskann_aux_shadow_tables[diskann aux shadow tables]
+  OrderedDict({
+    'sql': "SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 't_%' ORDER BY name",
+    'rows': list([
+      OrderedDict({
+        'name': 't_auxiliary',
+        'sql': 'CREATE TABLE "t_auxiliary"( rowid integer PRIMARY KEY , value00, value01)',
+      }),
+      OrderedDict({
+        'name': 't_chunks',
+        'sql': 'CREATE TABLE "t_chunks"(chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,size INTEGER NOT NULL,validity BLOB NOT NULL,rowids BLOB NOT NULL)',
+      }),
+      OrderedDict({
+        'name': 't_diskann_buffer00',
+        'sql': 'CREATE TABLE "t_diskann_buffer00" (rowid INTEGER PRIMARY KEY, vector BLOB NOT NULL)',
+      }),
+      OrderedDict({
+        'name': 't_diskann_nodes00',
+        'sql': 'CREATE TABLE "t_diskann_nodes00" (rowid INTEGER PRIMARY KEY, neighbors_validity BLOB NOT NULL, neighbor_ids BLOB NOT NULL, neighbor_quantized_vectors BLOB NOT NULL)',
+      }),
+      OrderedDict({
+        'name': 't_info',
+        'sql': 'CREATE TABLE "t_info" (key text primary key, value any)',
+      }),
+      OrderedDict({
+        'name': 't_rowids',
+        'sql': 'CREATE TABLE "t_rowids"(rowid INTEGER PRIMARY KEY AUTOINCREMENT,id,chunk_id INTEGER,chunk_offset INTEGER)',
+      }),
+      OrderedDict({
+        'name': 't_vectors00',
+        'sql': 'CREATE TABLE "t_vectors00" (rowid INTEGER PRIMARY KEY, vector BLOB NOT NULL)',
+      }),
+    ]),
+  })
+# ---
+# name: test_diskann_aux_update_and_delete[diskann aux after update+delete]
+  OrderedDict({
+    'sql': 'SELECT rowid, label FROM t ORDER BY rowid',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'label': 'item-1',
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'label': 'UPDATED',
+      }),
+      OrderedDict({
+        'rowid': 4,
+        'label': 'item-4',
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'label': 'item-5',
+      }),
+    ]),
+  })
+# ---
+# name: test_diskann_aux_update_and_delete[diskann aux shadow after update+delete]
+  OrderedDict({
+    'sql': 'SELECT rowid, value00 FROM t_auxiliary ORDER BY rowid',
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'value00': 'item-1',
+      }),
+      OrderedDict({
+        'rowid': 2,
+        'value00': 'UPDATED',
+      }),
+      OrderedDict({
+        'rowid': 4,
+        'value00': 'item-4',
+      }),
+      OrderedDict({
+        'rowid': 5,
+        'value00': 'item-5',
+      }),
+    ]),
+  })
+# ---
 # name: test_knn
   OrderedDict({
     'sql': 'select * from v',

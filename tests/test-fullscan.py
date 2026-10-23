@@ -9,24 +9,26 @@ def _f32(values):
 
 
 def test_fullscan_reads_indexed_columns(db):
-    # A rescore column keeps its vectors outside _vector_chunks, so a scan reads
-    # them row by row, beside a flat column read by chunk.
+    # Rescore and DiskANN columns keep their vectors outside _vector_chunks, so
+    # a scan reads them row by row, beside a flat column read by chunk.
     db.execute(
         "create virtual table v using vec0("
         "flat float[8], "
         "r float[8] indexed by rescore(quantizer=bit), "
+        "d float[8] indexed by diskann(neighbor_quantizer=binary), "
         "chunk_size=8)"
     )
     for i in range(1, 21):
         db.execute(
-            "insert into v(rowid, flat, r) values (?, ?, ?)",
-            [i, _f32([i] * 8), _f32([-i] * 8)],
+            "insert into v(rowid, flat, r, d) values (?, ?, ?, ?)",
+            [i, _f32([i] * 8), _f32([-i] * 8), _f32([i, -i] * 4)],
         )
-    rows = db.execute("select rowid, flat, r from v").fetchall()
+    rows = db.execute("select rowid, flat, r, d from v").fetchall()
     assert len(rows) == 20
-    for rowid, flat, r in rows:
+    for rowid, flat, r, d in rows:
         assert flat == _f32([rowid] * 8)
         assert r == _f32([-rowid] * 8)
+        assert d == _f32([rowid, -rowid] * 4)
 
 
 def test_fullscan_reads_every_vector_across_chunks(db):
@@ -88,8 +90,13 @@ def _scan_around(db, column, write):
     return {r[0]: struct.unpack("2f", r[1]) for r in head + scan.fetchall()}
 
 
-# A flat column is read by chunk, a rescore column row by row.
-SCANNED_COLUMNS = ["a float[2]", "a float[2] indexed by rescore(quantizer=int8)"]
+# A flat column is read by chunk, a rescore or DiskANN column row by row, and a
+# table whose only vector column is DiskANN keeps no chunks at all.
+SCANNED_COLUMNS = [
+    "a float[2]",
+    "a float[2] indexed by rescore(quantizer=int8)",
+    "a float[2] indexed by diskann(neighbor_quantizer=int8)",
+]
 
 
 @pytest.mark.parametrize("column", SCANNED_COLUMNS)

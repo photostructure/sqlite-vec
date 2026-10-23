@@ -274,6 +274,99 @@ def test_rescore_aux_delete(db, snapshot):
     ) == snapshot(name="rescore aux shadow after delete")
 
 
+def test_diskann_aux_shadow_tables(db, snapshot):
+    """DiskANN + aux column: verify shadow tables are created correctly."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8),
+            +label text,
+            +score float
+        )
+    """)
+    assert exec(
+        db,
+        "SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 't_%' ORDER BY name",
+    ) == snapshot(name="diskann aux shadow tables")
+
+
+def test_diskann_aux_insert_knn(db, snapshot):
+    """DiskANN + aux: insert, KNN, verify aux values returned."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8),
+            +label text
+        )
+    """)
+    data = [
+        ("red", [1, 0, 0, 0, 0, 0, 0, 0]),
+        ("green", [0, 1, 0, 0, 0, 0, 0, 0]),
+        ("blue", [0, 0, 1, 0, 0, 0, 0, 0]),
+    ]
+    for label, vec in data:
+        db.execute("INSERT INTO t(emb, label) VALUES (?, ?)", [_f32(vec), label])
+
+    assert exec(db, "SELECT rowid, label FROM t ORDER BY rowid") == snapshot(
+        name="diskann aux select all"
+    )
+    assert vec0_shadow_table_contents(db, "t") == snapshot(
+        name="diskann aux shadow contents"
+    )
+
+    rows = db.execute(
+        "SELECT label, distance FROM t WHERE emb MATCH ? AND k = 3",
+        [_f32([1, 0, 0, 0, 0, 0, 0, 0])],
+    ).fetchall()
+    assert len(rows) >= 1
+    assert rows[0][0] == "red"
+
+
+def test_diskann_aux_update_and_delete(db, snapshot):
+    """DiskANN + aux: update aux column, delete row, verify cleanup."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8),
+            +label text
+        )
+    """)
+    for i in range(5):
+        vec = [0.0] * 8
+        vec[i % 8] = 1.0
+        db.execute(
+            "INSERT INTO t(rowid, emb, label) VALUES (?, ?, ?)",
+            [i + 1, _f32(vec), f"item-{i+1}"],
+        )
+
+    db.execute("UPDATE t SET label = 'UPDATED' WHERE rowid = 2")
+    db.execute("DELETE FROM t WHERE rowid = 3")
+
+    assert exec(db, "SELECT rowid, label FROM t ORDER BY rowid") == snapshot(
+        name="diskann aux after update+delete"
+    )
+    assert exec(
+        db, "SELECT rowid, value00 FROM t_auxiliary ORDER BY rowid"
+    ) == snapshot(name="diskann aux shadow after update+delete")
+
+
+def test_diskann_aux_drop_cleans_all(db):
+    """DROP TABLE should remove aux shadow table too."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8),
+            +label text
+        )
+    """)
+    db.execute("INSERT INTO t(emb, label) VALUES (?, 'test')", [_f32([1] * 8)])
+    db.execute("DROP TABLE t")
+
+    tables = [
+        r[0]
+        for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE name LIKE 't_%'"
+        ).fetchall()
+    ]
+    assert "t_auxiliary" not in tables
+
+
 def exec(db, sql, parameters=[]):
     try:
         rows = db.execute(sql, parameters).fetchall()
