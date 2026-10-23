@@ -107,6 +107,24 @@ void test_vec0_token_next() {
   assert(token.token_type == TOKEN_TYPE_DIGIT);
   assert(token.end - token.start == 2);
 
+  // Left paren
+  input = "(";
+  rc = vec0_token_next(input, input + 1, &token);
+  assert(rc == VEC0_TOKEN_RESULT_SOME);
+  assert(token.token_type == TOKEN_TYPE_LPAREN);
+
+  // Right paren
+  input = ")";
+  rc = vec0_token_next(input, input + 1, &token);
+  assert(rc == VEC0_TOKEN_RESULT_SOME);
+  assert(token.token_type == TOKEN_TYPE_RPAREN);
+
+  // Comma
+  input = ",";
+  rc = vec0_token_next(input, input + 1, &token);
+  assert(rc == VEC0_TOKEN_RESULT_SOME);
+  assert(token.token_type == TOKEN_TYPE_COMMA);
+
   printf("  All vec0_token_next tests passed.\n");
 }
 
@@ -383,6 +401,91 @@ void test_vec0_parse_vector_column() {
     const char *input = "emb bit[64] distance_metric=cosine";
     rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc != SQLITE_OK);
+  }
+
+  // indexed by flat()
+  {
+    const char *input = "emb float[768] indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.dimensions == 768);
+    sqlite3_free(col.name);
+  }
+
+  // indexed by flat() with distance_metric
+  {
+    const char *input =
+        "emb float[768] distance_metric=cosine indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
+    sqlite3_free(col.name);
+  }
+
+  // indexed by flat() on int8
+  {
+    const char *input = "emb int8[256] indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_INT8);
+    sqlite3_free(col.name);
+  }
+
+  // indexed by flat() on bit
+  {
+    const char *input = "emb bit[64] indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_BIT);
+    sqlite3_free(col.name);
+  }
+
+  // default index_type is FLAT
+  {
+    const char *input = "emb float[768]";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    sqlite3_free(col.name);
+  }
+
+  // Error: indexed by (missing type name)
+  {
+    const char *input = "emb float[768] indexed by";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: indexed by unknown()
+  {
+    const char *input = "emb float[768] indexed by unknown()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: indexed by flat (missing parens)
+  {
+    const char *input = "emb float[768] indexed by flat";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: indexed flat() (missing "by")
+  {
+    const char *input = "emb float[768] indexed flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: a prefix of a keyword, even when not strict
+  {
+    const char *input = "emb float[768] index by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_ERROR);
   }
 
   printf("  All vec0_parse_vector_column tests passed.\n");

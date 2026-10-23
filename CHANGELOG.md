@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- A vector column definition accepts `indexed by flat()`, as in `embedding float[768] indexed by flat()`. `flat()` is the exhaustive search that a column without the clause gets. Ported from [asg017@0de765f](https://github.com/asg017/sqlite-vec/commit/0de765f) ([asg017#273](https://github.com/asg017/sqlite-vec/pull/273)).
+
 ### Changed
 
 - KNN `=`, `<`, `<=`, `>`, `>=`, and `BETWEEN` filters on a `text` partition key now compare under the `NOCASE` or `RTRIM` collation the query names, and so does an `IN` that names one, which `vec0` runs as one `=` per value: `name = 'alice' collate nocase` searched no partition keyed `'Alice'`, because `vec0` compared bytewise while telling SQLite the filter needed no second check, and `name collate nocase in ('alice', 'bob')` now also searches the partition keyed `'Alice'`. The range conditions SQLite passes for a `LIKE ... ESCAPE` pattern that begins with literal text compare under `NOCASE` too, so such a query no longer drops keys that differ from the pattern only in case. A filter that names any other collation now fails with `Collation "x" is not supported on the "name" partition key in a vec0 KNN query. Only BINARY, NOCASE, and RTRIM are supported.`, as on a `text` metadata column, and SQLite checks a text key's `!=` filter again, so with a collation it can return fewer than `k` rows. Ported from the unmerged [vlasky#12](https://github.com/vlasky/sqlite-vec/pull/12) ([asg017#329](https://github.com/asg017/sqlite-vec/pull/329)).

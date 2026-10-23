@@ -2293,6 +2293,9 @@ enum Vec0TokenType {
   TOKEN_TYPE_RBRACKET,
   TOKEN_TYPE_PLUS,
   TOKEN_TYPE_EQ,
+  TOKEN_TYPE_LPAREN,
+  TOKEN_TYPE_RPAREN,
+  TOKEN_TYPE_COMMA,
 };
 struct Vec0Token {
   enum Vec0TokenType token_type;
@@ -2342,6 +2345,24 @@ int vec0_token_next(char *start, char *end, struct Vec0Token *out) {
       out->start = ptr;
       out->end = ptr;
       out->token_type = TOKEN_TYPE_EQ;
+      return VEC0_TOKEN_RESULT_SOME;
+    } else if (curr == '(') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TOKEN_TYPE_LPAREN;
+      return VEC0_TOKEN_RESULT_SOME;
+    } else if (curr == ')') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TOKEN_TYPE_RPAREN;
+      return VEC0_TOKEN_RESULT_SOME;
+    } else if (curr == ',') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TOKEN_TYPE_COMMA;
       return VEC0_TOKEN_RESULT_SOME;
     } else if (is_alpha(curr)) {
       char *start = ptr;
@@ -2778,12 +2799,20 @@ enum Vec0DistanceMetrics {
   VEC0_DISTANCE_METRIC_L1 = 3,
 };
 
+// The index a vector column's `indexed by` clause names. A column without one
+// is indexed by flat(), which scans every vector of the column.
+// https://github.com/asg017/sqlite-vec/commit/0de765f
+enum Vec0IndexType {
+  VEC0_INDEX_TYPE_FLAT = 1,
+};
+
 struct VectorColumnDefinition {
   char *name;
   int name_length;
   size_t dimensions;
   enum VectorElementType element_type;
   enum Vec0DistanceMetrics distance_metric;
+  enum Vec0IndexType index_type;
 };
 
 struct Vec0PartitionColumnDefinition {
@@ -2848,6 +2877,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   int nameLength;
   enum VectorElementType elementType;
   enum Vec0DistanceMetrics distanceMetric = VEC0_DISTANCE_METRIC_L2;
+  enum Vec0IndexType indexType = VEC0_INDEX_TYPE_FLAT;
   int dimensions;
 
   vec0_scanner_init(&scanner, source, source_length);
@@ -2957,6 +2987,36 @@ int vec0_parse_vector_column(const char *source, int source_length,
         return SQLITE_ERROR;
       }
     }
+    // `indexed by flat()`. No table predates the clause, so its keywords match
+    // exactly whether or not the parse is strict.
+    else if (vec0_token_is_keyword(&token, "indexed", true)) {
+      rc = vec0_scanner_next(&scanner, &token);
+      if (rc != VEC0_TOKEN_RESULT_SOME ||
+          token.token_type != TOKEN_TYPE_IDENTIFIER ||
+          !vec0_token_is_keyword(&token, "by", true)) {
+        return SQLITE_ERROR;
+      }
+      rc = vec0_scanner_next(&scanner, &token);
+      if (rc != VEC0_TOKEN_RESULT_SOME ||
+          token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        return SQLITE_ERROR;
+      }
+      if (vec0_token_is_keyword(&token, "flat", true)) {
+        indexType = VEC0_INDEX_TYPE_FLAT;
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_LPAREN) {
+          return SQLITE_ERROR;
+        }
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_RPAREN) {
+          return SQLITE_ERROR;
+        }
+      } else {
+        return SQLITE_ERROR;
+      }
+    }
     // unknown key
     else {
       return SQLITE_ERROR;
@@ -2971,6 +3031,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   outColumn->distance_metric = distanceMetric;
   outColumn->element_type = elementType;
   outColumn->dimensions = dimensions;
+  outColumn->index_type = indexType;
   return SQLITE_OK;
 }
 

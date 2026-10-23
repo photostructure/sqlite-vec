@@ -24,6 +24,9 @@ enum Vec0TokenType {
   TOKEN_TYPE_RBRACKET = 3,
   TOKEN_TYPE_PLUS = 4,
   TOKEN_TYPE_EQ = 5,
+  TOKEN_TYPE_LPAREN = 6,
+  TOKEN_TYPE_RPAREN = 7,
+  TOKEN_TYPE_COMMA = 8,
 };
 
 #define VEC0_TOKEN_RESULT_EOF   1
@@ -60,12 +63,17 @@ enum Vec0DistanceMetrics {
   VEC0_DISTANCE_METRIC_L1 = 3,
 };
 
+enum Vec0IndexType {
+  VEC0_INDEX_TYPE_FLAT = 1,
+};
+
 struct VectorColumnDefinition {
   char *name;
   int name_length;
   size_t dimensions;
   enum VectorElementType element_type;
   enum Vec0DistanceMetrics distance_metric;
+  enum Vec0IndexType index_type;
 };
 
 int vec0_parse_vector_column(const char *source, int source_length,
