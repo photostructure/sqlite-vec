@@ -1,5 +1,11 @@
+import random
 import sqlite3
+import struct
 from collections import OrderedDict
+
+
+def _f32(values):
+    return struct.pack("%sf" % len(values), *values)
 
 
 def test_constructor_limit(db, snapshot):
@@ -159,6 +165,113 @@ def test_vacuum(db, snapshot):
 
     cur_page_count = exec(db, "pragma page_count")["rows"][0]["page_count"]
     assert cur_page_count < prev_page_count
+
+
+# ======================================================================
+# Auxiliary columns with non-flat indexes
+# ======================================================================
+
+
+def test_rescore_aux_shadow_tables(db, snapshot):
+    """Rescore + aux column: verify shadow tables are created correctly."""
+    db.execute(
+        "CREATE VIRTUAL TABLE t USING vec0("
+        "  emb float[128] indexed by rescore(quantizer=bit),"
+        "  +label text,"
+        "  +score float"
+        ")"
+    )
+    assert exec(
+        db,
+        "SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 't_%' ORDER BY name",
+    ) == snapshot(name="rescore aux shadow tables")
+
+
+def test_rescore_aux_insert_knn(db, snapshot):
+    """Insert with aux data, KNN should return aux column values."""
+    db.execute(
+        "CREATE VIRTUAL TABLE t USING vec0("
+        "  emb float[128] indexed by rescore(quantizer=bit),"
+        "  +label text"
+        ")"
+    )
+    random.seed(77)
+    data = [
+        ("alpha", [random.gauss(0, 1) for _ in range(128)]),
+        ("beta", [random.gauss(0, 1) for _ in range(128)]),
+        ("gamma", [random.gauss(0, 1) for _ in range(128)]),
+    ]
+    for label, vec in data:
+        db.execute(
+            "INSERT INTO t(emb, label) VALUES (?, ?)",
+            [_f32(vec), label],
+        )
+
+    assert exec(db, "SELECT rowid, label FROM t ORDER BY rowid") == snapshot(
+        name="rescore aux select all"
+    )
+    assert vec0_shadow_table_contents(db, "t") == snapshot(
+        name="rescore aux shadow contents"
+    )
+
+    # KNN should include aux column, "alpha" closest to its own vector
+    rows = db.execute(
+        "SELECT label, distance FROM t WHERE emb MATCH ? ORDER BY distance LIMIT 3",
+        [_f32(data[0][1])],
+    ).fetchall()
+    assert len(rows) == 3
+    assert rows[0][0] == "alpha"
+
+
+def test_rescore_aux_update(db):
+    """UPDATE aux column on rescore table should work without affecting vectors."""
+    db.execute(
+        "CREATE VIRTUAL TABLE t USING vec0("
+        "  emb float[128] indexed by rescore(quantizer=bit),"
+        "  +label text"
+        ")"
+    )
+    random.seed(88)
+    vec = [random.gauss(0, 1) for _ in range(128)]
+    db.execute(
+        "INSERT INTO t(rowid, emb, label) VALUES (1, ?, 'original')", [_f32(vec)]
+    )
+    db.execute("UPDATE t SET label = 'updated' WHERE rowid = 1")
+
+    assert db.execute("SELECT label FROM t WHERE rowid = 1").fetchone()[0] == "updated"
+
+    # KNN still works with updated aux
+    rows = db.execute(
+        "SELECT rowid, label FROM t WHERE emb MATCH ? ORDER BY distance LIMIT 1",
+        [_f32(vec)],
+    ).fetchall()
+    assert rows[0][0] == 1
+    assert rows[0][1] == "updated"
+
+
+def test_rescore_aux_delete(db, snapshot):
+    """DELETE should remove aux data from shadow table."""
+    db.execute(
+        "CREATE VIRTUAL TABLE t USING vec0("
+        "  emb float[128] indexed by rescore(quantizer=bit),"
+        "  +label text"
+        ")"
+    )
+    random.seed(99)
+    for i in range(5):
+        db.execute(
+            "INSERT INTO t(rowid, emb, label) VALUES (?, ?, ?)",
+            [i + 1, _f32([random.gauss(0, 1) for _ in range(128)]), f"item-{i+1}"],
+        )
+
+    db.execute("DELETE FROM t WHERE rowid = 3")
+
+    assert exec(db, "SELECT rowid, label FROM t ORDER BY rowid") == snapshot(
+        name="rescore aux after delete"
+    )
+    assert exec(
+        db, "SELECT rowid, value00 FROM t_auxiliary ORDER BY rowid"
+    ) == snapshot(name="rescore aux shadow after delete")
 
 
 def exec(db, sql, parameters=[]):
