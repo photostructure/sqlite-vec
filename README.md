@@ -295,8 +295,10 @@ VACUUM;
 `VACUUM` should not corrupt vec tables; a checkpoint first is recommended when
 using WAL so the rewrite starts from a clean state.
 
-`optimize` runs through a hidden column named after the table, so a `vec0`
-table cannot have another column with its name. `CREATE` rejects tables such as
+`optimize`, like the `oversample=N` command of a rescore index and the
+`search_list_size=N` commands of a DiskANN index, runs through a hidden column
+named after the table, so a `vec0` table cannot have another column with its
+name. `CREATE` rejects tables such as
 `CREATE VIRTUAL TABLE emb USING vec0(emb float[4])`, and tables named
 `distance`, `k`, `mmr_lambda`, or (without a primary key column) `rowid`, which
 are names of columns `vec0` always declares. Older releases allowed these
@@ -307,6 +309,133 @@ table to get it back:
 ALTER TABLE emb RENAME TO emb_vectors;
 INSERT INTO emb_vectors(emb_vectors) VALUES('optimize');
 ```
+
+### Rescore Index
+
+A `float` vector column declared `indexed by rescore(quantizer=bit)` or
+`indexed by rescore(quantizer=int8)` also keeps each vector quantized, to 1 bit
+or 8 bits per dimension. A KNN query scans the quantized vectors for the
+`k * oversample` nearest rows, then ranks those candidates by the distances of
+their `float` vectors. The distances it returns are exact, and its rows are
+those of an exact search whenever the nearest rows are among the candidates:
+
+```sql
+create virtual table vec_rescore using vec0(
+  sample_embedding float[8] indexed by rescore(quantizer=bit)
+);
+insert into vec_rescore(rowid, sample_embedding)
+  select rowid, sample_embedding from vec_examples;
+
+select rowid, distance
+from vec_rescore
+where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
+  and k = 3;
+/*
+┌───────┬──────────────────┐
+│ rowid │     distance     │
+├───────┼──────────────────┤
+│ 5     │ 1.16368770599365 │
+│ 13    │ 1.75137972831726 │
+│ 11    │ 1.83941268920898 │
+└───────┴──────────────────┘
+*/
+```
+
+`oversample` is 8 unless the column sets it, as in
+`indexed by rescore(quantizer=bit, oversample=16)`, from 1 to 128. The
+`oversample=N` command sets it for every rescore column, for the queries of the
+connection that runs it. With an oversample of 1, the query above keeps only the
+3 rows nearest by bit distance, and row 11 is not among them:
+
+```sql
+insert into vec_rescore(vec_rescore) values ('oversample=1');
+
+select rowid, distance
+from vec_rescore
+where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
+  and k = 3;
+/*
+┌───────┬──────────────────┐
+│ rowid │     distance     │
+├───────┼──────────────────┤
+│ 5     │ 1.16368770599365 │
+│ 13    │ 1.75137972831726 │
+│ 16    │ 2.36842274665833 │
+└───────┴──────────────────┘
+*/
+```
+
+- `quantizer=bit` sets one bit for each value >= 0, and needs a number of
+  dimensions divisible by 8. `quantizer=int8` maps [-1, 1] onto the 256 values
+  of an int8, so it suits vectors whose values lie in that range, such as
+  normalized embeddings.
+- Distance constraints apply to the exact distances of the candidates, so a
+  query with `distance > x`, as in cursor-based pagination, returns fewer than
+  `k` rows when most of the candidates are nearer than `x`.
+- A table with a rescore column cannot have metadata or partition key columns.
+  Auxiliary columns work.
+- `indexed by flat()` declares the exhaustive search that a column without the
+  clause gets.
+
+### DiskANN Index
+
+A `float` or `int8` vector column declared
+`indexed by diskann(neighbor_quantizer=binary)` or
+`indexed by diskann(neighbor_quantizer=int8)` keeps a graph of its rows, after
+the LM-DiskANN paper: each row links to up to `n_neighbors` others and keeps
+their vectors quantized. A KNN query walks the graph from one entry row,
+keeping the `search_list_size` nearest rows it has seen, and ranks each row by
+its exact distance once it reaches it. It reads a few hundred rows of a large
+table where a flat column reads them all, and its distances are exact, but a
+row it never reaches is missing from its results:
+
+```sql
+create virtual table vec_diskann using vec0(
+  sample_embedding float[8] indexed by diskann(neighbor_quantizer=binary, n_neighbors=8)
+);
+insert into vec_diskann(rowid, sample_embedding)
+  select rowid, sample_embedding from vec_examples;
+
+select rowid, distance
+from vec_diskann
+where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
+  and k = 3;
+/*
+┌───────┬──────────────────┐
+│ rowid │     distance     │
+├───────┼──────────────────┤
+│ 5     │ 1.16368770599365 │
+│ 13    │ 1.75137972831726 │
+│ 11    │ 1.83941268920898 │
+└───────┴──────────────────┘
+*/
+```
+
+- `neighbor_quantizer=binary` keeps a bit for each value > 0, and needs a number
+  of dimensions divisible by 8. `neighbor_quantizer=int8` keeps a byte per
+  dimension: a `float` value in [-1, 1] mapped onto the 256 values of an int8,
+  and an `int8` column's own values.
+- `n_neighbors` is 72 unless the column sets it, a multiple of 8 up to 256.
+- `search_list_size` is 128 unless the column sets it, for inserts and queries
+  alike, or `search_list_size_search` and `search_list_size_insert` set the two
+  apart. A query keeps at least `k` rows. The commands `search_list_size=N`,
+  `search_list_size_search=N` and `search_list_size_insert=N` set them for every
+  DiskANN column, for the connection that runs them, as in
+  `insert into vec_diskann(vec_diskann) values ('search_list_size_search=256')`.
+- With `buffer_threshold=N`, inserted rows wait in a buffer and join the graph
+  `N` at a time. A KNN query compares every row in the buffer by its exact
+  distance.
+- With `rowid = ?` or `rowid in (...)`, a KNN query ranks the rows they name by
+  their exact distances, without the graph.
+- Distance constraints apply to the exact distances of the rows the query
+  found, so a query with `distance > x` returns fewer than `k` rows when most of
+  them are nearer than `x`. MMR reranks them as it does any KNN query.
+- A table with a DiskANN column cannot have metadata or partition key columns,
+  and a `bit` column cannot be indexed by DiskANN. Auxiliary columns work.
+- `UPDATE` of a DiskANN column's vector fails, since its row's links were
+  chosen for the vector it has; delete the row and insert it again.
+- A `DELETE` links the row's neighbors to each other and reads every node of
+  the graph to remove the links to the row.
 
 ## Sponsors
 

@@ -1,7 +1,7 @@
 """ALTER TABLE ... RENAME on vec0 tables.
 
 Ported from asg017/sqlite-vec@c560710 and @8105eee, without the tests for
-upstream's ANN indexes, which this fork does not have.
+upstream's DiskANN and IVF indexes, which this fork does not have.
 """
 
 import sqlite3
@@ -171,6 +171,81 @@ def test_rename_with_metadata(db):
         "v2_rowids",
         "v2_vector_chunks00",
     ]
+    assert _shadow_tables(db, "v") == []
+
+
+def test_rename_diskann(db):
+    """Rename should work on DiskANN-indexed tables (no _vector_chunks shadow)."""
+    db.execute("""
+        CREATE VIRTUAL TABLE v USING vec0(
+            a float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    db.execute("insert into v(rowid, a) values (1, ?)", [_f32([0.1] * 8)])
+
+    # DiskANN columns use _vectors / _diskann_nodes / _diskann_buffer instead
+    # of _vector_chunks; the rename must skip the missing _vector_chunks ALTER
+    # and rename all three DiskANN shadow tables.
+    before = _shadow_tables(db, "v")
+    assert "v_vectors00" in before
+    assert "v_diskann_nodes00" in before
+    assert "v_diskann_buffer00" in before
+    assert "v_vector_chunks00" not in before
+
+    db.execute("ALTER TABLE v RENAME TO v2")
+
+    rows = db.execute(
+        "select rowid from v2 where a match ? and k=10",
+        [_f32([0.1] * 8)],
+    ).fetchall()
+    assert rows[0][0] == 1
+
+    # the graph takes a new node under the new name
+    db.execute("insert into v2(rowid, a) values (2, ?)", [_f32([0.9] * 8)])
+    rows = db.execute(
+        "select rowid from v2 where a match ? and k=1",
+        [_f32([0.9] * 8)],
+    ).fetchall()
+    assert rows[0][0] == 2
+
+    after = _shadow_tables(db, "v2")
+    assert "v2_vectors00" in after
+    assert "v2_diskann_nodes00" in after
+    assert "v2_diskann_buffer00" in after
+    assert "v2_vector_chunks00" not in after
+    assert _shadow_tables(db, "v") == []
+
+
+def test_rename_rescore(db):
+    """Rename should work on rescore-indexed tables (no _vector_chunks shadow)."""
+    db.execute("""
+        CREATE VIRTUAL TABLE v USING vec0(
+            a float[8] indexed by rescore(quantizer=bit)
+        )
+    """)
+    db.execute("insert into v(rowid, a) values (1, ?)", [_f32([0.1] * 8)])
+    db.execute("insert into v(rowid, a) values (2, ?)", [_f32([0.9] * 8)])
+
+    # Rescore columns use _rescore_chunks / _rescore_vectors instead of
+    # _vector_chunks; the rename must skip the missing _vector_chunks ALTER
+    # and rename both rescore shadow tables.
+    before = _shadow_tables(db, "v")
+    assert "v_rescore_chunks00" in before
+    assert "v_rescore_vectors00" in before
+    assert "v_vector_chunks00" not in before
+
+    db.execute("ALTER TABLE v RENAME TO v2")
+
+    rows = db.execute(
+        "select rowid from v2 where a match ? and k=10",
+        [_f32([0.1] * 8)],
+    ).fetchall()
+    assert rows[0][0] == 1
+
+    after = _shadow_tables(db, "v2")
+    assert "v2_rescore_chunks00" in after
+    assert "v2_rescore_vectors00" in after
+    assert "v2_vector_chunks00" not in after
     assert _shadow_tables(db, "v") == []
 
 

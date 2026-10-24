@@ -417,6 +417,41 @@ def interrupt_template():
         "INSERT INTO vt(id, vector) VALUES (?, ?)",
         [(f"id{i}", f"[{i}, {i % 3}]") for i in range(1, 9)],
     )
+    # vr is indexed by rescore(). Its first chunk has a deleted row for optimize
+    # to skip, and rowid 9 is the only row of its second chunk.
+    db.execute(
+        "CREATE VIRTUAL TABLE vr USING vec0(vector float[2] indexed by "
+        "rescore(quantizer=int8), +a text, chunk_size=8)"
+    )
+    db.executemany(
+        "INSERT INTO vr(rowid, vector, a) VALUES (?, ?, ?)",
+        [(i, f"[{i / 10}, {i % 3 / 10}]", f"aux {i}") for i in range(1, 10)],
+    )
+    db.execute("DELETE FROM vr WHERE rowid = 2")
+    # vd and vb are indexed by diskann(), so they have no chunks, and rowid 1,
+    # inserted first, is the medoid of each graph. vb adds vectors to its graph
+    # four at a time: rowids 1 to 4 are nodes, 5 to 7 wait in its buffer, and
+    # one more insert adds them.
+    diskann_vectors = [
+        struct.pack("8f", *[(i * 7 + j * 3) % 11 / 10 - 0.5 for j in range(8)])
+        for i in range(10)
+    ]
+    db.execute(
+        "CREATE VIRTUAL TABLE vd USING vec0(vector float[8] indexed by "
+        "diskann(neighbor_quantizer=binary, n_neighbors=8), +a text)"
+    )
+    db.executemany(
+        "INSERT INTO vd(rowid, vector, a) VALUES (?, ?, ?)",
+        [(i, diskann_vectors[i], f"aux {i}") for i in range(1, 10)],
+    )
+    db.execute(
+        "CREATE VIRTUAL TABLE vb USING vec0(vector float[8] indexed by "
+        "diskann(neighbor_quantizer=binary, n_neighbors=8, buffer_threshold=4))"
+    )
+    db.executemany(
+        "INSERT INTO vb(rowid, vector) VALUES (?, ?)",
+        [(i, diskann_vectors[i]) for i in range(1, 8)],
+    )
     db.commit()
     return db.serialize()
 
@@ -504,6 +539,63 @@ def _run_interrupted(template, sql, n, mode):
         pytest.param("DELETE FROM vt WHERE id = 'id4'", id="delete-text-pk"),
         pytest.param("DELETE FROM vp WHERE rowid = 4", id="delete-emptying-chunk"),
         pytest.param("INSERT INTO vp(vp) VALUES ('optimize')", id="optimize"),
+        pytest.param(
+            "SELECT rowid, distance, a FROM vr WHERE vector MATCH '[0.3, 0.4]' "
+            "AND k = 3 AND distance < 10",
+            id="knn-rescore",
+        ),
+        pytest.param("SELECT rowid, vector, a FROM vr", id="fullscan-rescore"),
+        pytest.param(
+            "SELECT rowid, vector, a FROM vr WHERE rowid = 4", id="point-rescore"
+        ),
+        pytest.param(
+            "INSERT INTO vr(rowid, vector, a) VALUES (100, '[0.1, 0.1]', 'x')",
+            id="insert-rescore",
+        ),
+        pytest.param(
+            "UPDATE vr SET vector = '[0.9, 0.9]' WHERE rowid = 4", id="update-rescore"
+        ),
+        pytest.param("DELETE FROM vr WHERE rowid = 4", id="delete-rescore"),
+        pytest.param(
+            "DELETE FROM vr WHERE rowid = 9", id="delete-emptying-rescore-chunk"
+        ),
+        pytest.param("INSERT INTO vr(vr) VALUES ('optimize')", id="optimize-rescore"),
+        pytest.param(
+            "SELECT rowid, distance, a FROM vd WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 3 "
+            "AND distance < 10",
+            id="knn-diskann",
+        ),
+        pytest.param(
+            "SELECT rowid, distance FROM vd WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 2 "
+            "AND rowid IN (1, 3, 5)",
+            id="knn-rowid-in-diskann",
+        ),
+        pytest.param(
+            "SELECT rowid, distance FROM vb WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 3",
+            id="knn-buffered-diskann",
+        ),
+        pytest.param("SELECT rowid, vector, a FROM vd", id="fullscan-diskann"),
+        pytest.param(
+            "SELECT rowid, vector, a FROM vd WHERE rowid = 4", id="point-diskann"
+        ),
+        pytest.param(
+            "INSERT INTO vd(rowid, vector, a) VALUES "
+            "(100, '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]', 'x')",
+            id="insert-diskann",
+        ),
+        pytest.param(
+            "INSERT INTO vb(rowid, vector) VALUES "
+            "(100, '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]')",
+            id="insert-flushing-diskann-buffer",
+        ),
+        pytest.param("UPDATE vd SET a = 'y' WHERE rowid = 4", id="update-diskann"),
+        pytest.param("DELETE FROM vd WHERE rowid = 4", id="delete-diskann"),
+        pytest.param("DELETE FROM vd WHERE rowid = 1", id="delete-diskann-medoid"),
+        pytest.param("DELETE FROM vb WHERE rowid = 6", id="delete-diskann-buffered"),
+        pytest.param("INSERT INTO vd(vd) VALUES ('optimize')", id="optimize-diskann"),
     ],
 )
 def test_interrupt_is_reported_as_interrupt(interrupt_template, sql, mode):
