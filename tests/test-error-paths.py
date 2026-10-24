@@ -14,7 +14,13 @@ import re
 import subprocess
 import sys
 
-from conftest import get_extension_path
+from conftest import _has_build_flag, get_extension_path
+
+HAS_IVF = _has_build_flag("ivf")
+ivf_only = pytest.mark.skipif(
+    not HAS_IVF,
+    reason="IVF not enabled (compile with -DSQLITE_VEC_EXPERIMENTAL_IVF_ENABLE=1)",
+)
 
 
 def _raises(message, error=sqlite3.OperationalError):
@@ -417,6 +423,74 @@ def interrupt_template():
         "INSERT INTO vt(id, vector) VALUES (?, ?)",
         [(f"id{i}", f"[{i}, {i % 3}]") for i in range(1, 9)],
     )
+    # vr is indexed by rescore(). Its first chunk has a deleted row for optimize
+    # to skip, and rowid 9 is the only row of its second chunk.
+    db.execute(
+        "CREATE VIRTUAL TABLE vr USING vec0(vector float[2] indexed by "
+        "rescore(quantizer=int8), +a text, chunk_size=8)"
+    )
+    db.executemany(
+        "INSERT INTO vr(rowid, vector, a) VALUES (?, ?, ?)",
+        [(i, f"[{i / 10}, {i % 3 / 10}]", f"aux {i}") for i in range(1, 10)],
+    )
+    db.execute("DELETE FROM vr WHERE rowid = 2")
+    # vd and vb are indexed by diskann(), so they have no chunks, and rowid 1,
+    # inserted first, is the medoid of each graph. vb adds vectors to its graph
+    # four at a time: rowids 1 to 4 are nodes, 5 to 7 wait in its buffer, and
+    # one more insert adds them.
+    diskann_vectors = [
+        struct.pack("8f", *[(i * 7 + j * 3) % 11 / 10 - 0.5 for j in range(8)])
+        for i in range(10)
+    ]
+    db.execute(
+        "CREATE VIRTUAL TABLE vd USING vec0(vector float[8] indexed by "
+        "diskann(neighbor_quantizer=binary, n_neighbors=8), +a text)"
+    )
+    db.executemany(
+        "INSERT INTO vd(rowid, vector, a) VALUES (?, ?, ?)",
+        [(i, diskann_vectors[i], f"aux {i}") for i in range(1, 10)],
+    )
+    db.execute(
+        "CREATE VIRTUAL TABLE vb USING vec0(vector float[8] indexed by "
+        "diskann(neighbor_quantizer=binary, n_neighbors=8, buffer_threshold=4))"
+    )
+    db.executemany(
+        "INSERT INTO vb(rowid, vector) VALUES (?, ?)",
+        [(i, diskann_vectors[i]) for i in range(1, 8)],
+    )
+    if HAS_IVF:
+        # vi and viq are indexed by ivf(), with centroids: rows 1 to 9 are in
+        # the cells of their centroids, and rowid 3 left a free slot. viq
+        # quantizes, so it keeps its float32 vectors in _ivf_vectors00. viu has
+        # two centroids set by hand and its rows in cells of no centroid, for
+        # assign-vectors.
+        for table, options in (
+            ("vi", "nlist=2, nprobe=2"),
+            ("viq", "nlist=2, quantizer=int8, oversample=4"),
+        ):
+            db.execute(
+                f"CREATE VIRTUAL TABLE {table} USING vec0(vector float[8] "
+                f"indexed by ivf({options}), +a text)"
+            )
+            db.executemany(
+                f"INSERT INTO {table}(rowid, vector, a) VALUES (?, ?, ?)",
+                [(i, diskann_vectors[i], f"aux {i}") for i in range(1, 10)],
+            )
+            db.execute(f"INSERT INTO {table}({table}) VALUES ('compute-centroids')")
+            db.execute(f"DELETE FROM {table} WHERE rowid = 3")
+        db.execute(
+            "CREATE VIRTUAL TABLE viu USING vec0(vector float[8] "
+            "indexed by ivf(nlist=0))"
+        )
+        db.executemany(
+            "INSERT INTO viu(rowid, vector) VALUES (?, ?)",
+            [(i, diskann_vectors[i]) for i in range(1, 7)],
+        )
+        for centroid in (0, 1):
+            db.execute(
+                f"INSERT INTO viu(viu, vector) VALUES ('set-centroid:{centroid}', ?)",
+                [diskann_vectors[centroid + 7]],
+            )
     db.commit()
     return db.serialize()
 
@@ -504,6 +578,149 @@ def _run_interrupted(template, sql, n, mode):
         pytest.param("DELETE FROM vt WHERE id = 'id4'", id="delete-text-pk"),
         pytest.param("DELETE FROM vp WHERE rowid = 4", id="delete-emptying-chunk"),
         pytest.param("INSERT INTO vp(vp) VALUES ('optimize')", id="optimize"),
+        pytest.param(
+            "SELECT rowid, distance, a FROM vr WHERE vector MATCH '[0.3, 0.4]' "
+            "AND k = 3 AND distance < 10",
+            id="knn-rescore",
+        ),
+        pytest.param("SELECT rowid, vector, a FROM vr", id="fullscan-rescore"),
+        pytest.param(
+            "SELECT rowid, vector, a FROM vr WHERE rowid = 4", id="point-rescore"
+        ),
+        pytest.param(
+            "INSERT INTO vr(rowid, vector, a) VALUES (100, '[0.1, 0.1]', 'x')",
+            id="insert-rescore",
+        ),
+        pytest.param(
+            "UPDATE vr SET vector = '[0.9, 0.9]' WHERE rowid = 4", id="update-rescore"
+        ),
+        pytest.param("DELETE FROM vr WHERE rowid = 4", id="delete-rescore"),
+        pytest.param(
+            "DELETE FROM vr WHERE rowid = 9", id="delete-emptying-rescore-chunk"
+        ),
+        pytest.param("INSERT INTO vr(vr) VALUES ('optimize')", id="optimize-rescore"),
+        pytest.param(
+            "SELECT rowid, distance, a FROM vd WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 3 "
+            "AND distance < 10",
+            id="knn-diskann",
+        ),
+        pytest.param(
+            "SELECT rowid, distance FROM vd WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 2 "
+            "AND rowid IN (1, 3, 5)",
+            id="knn-rowid-in-diskann",
+        ),
+        pytest.param(
+            "SELECT rowid, distance FROM vb WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 3",
+            id="knn-buffered-diskann",
+        ),
+        pytest.param("SELECT rowid, vector, a FROM vd", id="fullscan-diskann"),
+        pytest.param(
+            "SELECT rowid, vector, a FROM vd WHERE rowid = 4", id="point-diskann"
+        ),
+        pytest.param(
+            "INSERT INTO vd(rowid, vector, a) VALUES "
+            "(100, '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]', 'x')",
+            id="insert-diskann",
+        ),
+        pytest.param(
+            "INSERT INTO vb(rowid, vector) VALUES "
+            "(100, '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]')",
+            id="insert-flushing-diskann-buffer",
+        ),
+        pytest.param("UPDATE vd SET a = 'y' WHERE rowid = 4", id="update-diskann"),
+        pytest.param("DELETE FROM vd WHERE rowid = 4", id="delete-diskann"),
+        pytest.param("DELETE FROM vd WHERE rowid = 1", id="delete-diskann-medoid"),
+        pytest.param("DELETE FROM vb WHERE rowid = 6", id="delete-diskann-buffered"),
+        pytest.param("INSERT INTO vd(vd) VALUES ('optimize')", id="optimize-diskann"),
+        pytest.param(
+            "SELECT rowid, distance, a FROM vi WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 3 "
+            "AND distance < 10",
+            id="knn-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "SELECT rowid, distance FROM vi WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 2 "
+            "AND rowid IN (1, 3, 5)",
+            id="knn-rowid-in-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "SELECT rowid, distance FROM viq WHERE vector MATCH "
+            "'[0.1, 0.2, -0.3, 0.4, -0.1, 0.2, 0.3, -0.4]' AND k = 3",
+            id="knn-quantized-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "SELECT rowid, vector, a FROM vi", id="fullscan-ivf", marks=ivf_only
+        ),
+        pytest.param(
+            "SELECT rowid, vector FROM viq", id="fullscan-quantized-ivf", marks=ivf_only
+        ),
+        pytest.param(
+            "SELECT rowid, vector, a FROM vi WHERE rowid = 4",
+            id="point-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "INSERT INTO vi(rowid, vector, a) VALUES "
+            "(100, '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]', 'x')",
+            id="insert-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "INSERT INTO viq(rowid, vector, a) VALUES "
+            "(100, '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]', 'x')",
+            id="insert-quantized-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "INSERT INTO viu(rowid, vector) VALUES "
+            "(100, '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]')",
+            id="insert-unassigned-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "UPDATE vi SET a = 'y' WHERE rowid = 4", id="update-ivf", marks=ivf_only
+        ),
+        pytest.param("DELETE FROM vi WHERE rowid = 4", id="delete-ivf", marks=ivf_only),
+        pytest.param(
+            "DELETE FROM viq WHERE rowid = 4", id="delete-quantized-ivf", marks=ivf_only
+        ),
+        pytest.param(
+            "INSERT INTO vi(vi) VALUES ('optimize')", id="optimize-ivf", marks=ivf_only
+        ),
+        pytest.param(
+            "INSERT INTO vi(vi) VALUES ('compute-centroids')",
+            id="compute-centroids-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "INSERT INTO viq(viq) VALUES "
+            """('compute-centroids:{"nlist": 3, "seed": 2}')""",
+            id="compute-centroids-quantized-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "INSERT INTO viq(viq) VALUES ('clear-centroids')",
+            id="clear-centroids-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "INSERT INTO viu(viu, vector) VALUES "
+            "('set-centroid:5', '[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1]')",
+            id="set-centroid-ivf",
+            marks=ivf_only,
+        ),
+        pytest.param(
+            "INSERT INTO viu(viu) VALUES ('assign-vectors')",
+            id="assign-vectors-ivf",
+            marks=ivf_only,
+        ),
     ],
 )
 def test_interrupt_is_reported_as_interrupt(interrupt_template, sql, mode):

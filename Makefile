@@ -211,7 +211,7 @@ test-loadable-watch:
 
 test-unit: | $(prefix)
 	$(CC) tests/test-unit.c sqlite-vec.c vendor/sqlite3.c \
-		-I./ -Ivendor -DSQLITE_CORE -o $(prefix)/test-unit -lm
+		-I./ -Ivendor -DSQLITE_CORE $(EXT_CFLAGS) -o $(prefix)/test-unit -lm
 	$(prefix)/test-unit
 
 test-all: test test-loadable test-unit

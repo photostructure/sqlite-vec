@@ -73,6 +73,18 @@ typedef size_t usize;
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 #define min(a, b) (((a) <= (b)) ? (a) : (b))
 
+#ifndef SQLITE_VEC_ENABLE_RESCORE
+#define SQLITE_VEC_ENABLE_RESCORE 1
+#endif
+
+#ifndef SQLITE_VEC_ENABLE_DISKANN
+#define SQLITE_VEC_ENABLE_DISKANN 1
+#endif
+
+#ifndef SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+#define SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE 0
+#endif
+
 // VEC0_UNPREDICTABLE(cond) tells clang that cond is hard to predict, so it
 // emits a conditional move instead of a branch. Other compilers get cond as is.
 #if defined(__has_builtin)
@@ -2287,6 +2299,9 @@ enum Vec0TokenType {
   TOKEN_TYPE_RBRACKET,
   TOKEN_TYPE_PLUS,
   TOKEN_TYPE_EQ,
+  TOKEN_TYPE_LPAREN,
+  TOKEN_TYPE_RPAREN,
+  TOKEN_TYPE_COMMA,
 };
 struct Vec0Token {
   enum Vec0TokenType token_type;
@@ -2336,6 +2351,24 @@ int vec0_token_next(char *start, char *end, struct Vec0Token *out) {
       out->start = ptr;
       out->end = ptr;
       out->token_type = TOKEN_TYPE_EQ;
+      return VEC0_TOKEN_RESULT_SOME;
+    } else if (curr == '(') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TOKEN_TYPE_LPAREN;
+      return VEC0_TOKEN_RESULT_SOME;
+    } else if (curr == ')') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TOKEN_TYPE_RPAREN;
+      return VEC0_TOKEN_RESULT_SOME;
+    } else if (curr == ',') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TOKEN_TYPE_COMMA;
       return VEC0_TOKEN_RESULT_SOME;
     } else if (is_alpha(curr)) {
       char *start = ptr;
@@ -2772,12 +2805,134 @@ enum Vec0DistanceMetrics {
   VEC0_DISTANCE_METRIC_L1 = 3,
 };
 
+// The index a vector column's `indexed by` clause names. A column without one
+// is indexed by flat(), which scans every vector of the column.
+// https://github.com/asg017/sqlite-vec/commit/0de765f
+enum Vec0IndexType {
+  VEC0_INDEX_TYPE_FLAT = 1,
+#if SQLITE_VEC_ENABLE_RESCORE
+  VEC0_INDEX_TYPE_RESCORE = 2,
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  VEC0_INDEX_TYPE_IVF = 3,
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+  VEC0_INDEX_TYPE_DISKANN = 4,
+#endif
+};
+
+#if SQLITE_VEC_ENABLE_RESCORE
+// `indexed by rescore(quantizer=bit|int8, oversample=N)` keeps a quantized copy
+// of each float32 vector in chunks for the KNN scan, which finds k * oversample
+// candidates, and the vectors themselves by rowid to rank the candidates by
+// their exact distances.
+// https://github.com/asg017/sqlite-vec/commit/ba0db0b
+enum Vec0RescoreQuantizerType {
+  VEC0_RESCORE_QUANTIZER_BIT = 1,
+  VEC0_RESCORE_QUANTIZER_INT8 = 2,
+};
+
+struct Vec0RescoreConfig {
+  enum Vec0RescoreQuantizerType quantizer_type;
+  // the oversample option of CREATE
+  int oversample;
+  // set by the 'oversample=N' command; 0 means the CREATE value
+  int oversample_search;
+};
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+// `indexed by diskann(neighbor_quantizer=binary|int8, ...)` keeps a graph of
+// the column's vectors, each node holding up to n_neighbors edges with a
+// quantized copy of each neighbor's vector, and a KNN query walks the graph
+// from its medoid, after the algorithms of the LM-DiskANN paper.
+// https://github.com/asg017/sqlite-vec/commit/575371d
+#define VEC0_DISKANN_DEFAULT_N_NEIGHBORS 72
+#define VEC0_DISKANN_MAX_N_NEIGHBORS 256
+#define VEC0_DISKANN_DEFAULT_SEARCH_LIST_SIZE 128
+#define VEC0_DISKANN_DEFAULT_ALPHA 1.2f
+
+enum Vec0DiskannQuantizerType {
+  // one bit per dimension
+  VEC0_DISKANN_QUANTIZER_BINARY = 1,
+  // one byte per dimension
+  VEC0_DISKANN_QUANTIZER_INT8 = 2,
+};
+
+struct Vec0DiskannConfig {
+  // how each node keeps its neighbors' vectors
+  enum Vec0DiskannQuantizerType quantizer_type;
+  // the most edges a node keeps (R in the paper), a multiple of 8
+  int n_neighbors;
+  // the candidates a graph search keeps (L in the paper), for inserts and
+  // queries alike unless one of the two below is set
+  int search_list_size;
+  // the search list size of queries and of inserts; 0 means search_list_size
+  int search_list_size_search;
+  int search_list_size_insert;
+  // how far an edge must reach past the edges already kept for RobustPrune to
+  // keep it
+  f32 alpha;
+  // with N > 0, inserted vectors wait in _diskann_bufferNN and join the graph
+  // N at a time
+  int buffer_threshold;
+};
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+// `indexed by ivf(nlist=N, nprobe=N, quantizer=none|int8|binary,
+// oversample=N)` keeps the column's vectors in cells, each holding the rows
+// nearest one centroid of a k-means clustering, and a KNN query reads only the
+// cells of the nprobe centroids nearest the query, with the cells of the rows
+// no clustering has placed yet.
+// https://github.com/asg017/sqlite-vec/commit/e2c38f3
+#define VEC0_IVF_DEFAULT_NLIST 128
+#define VEC0_IVF_DEFAULT_NPROBE 10
+#define VEC0_IVF_MAX_NLIST 65536
+// the rows one cell holds
+#define VEC0_IVF_CELL_MAX_VECTORS 64
+// the centroid id of the cells holding the rows no clustering has placed
+#define VEC0_IVF_UNASSIGNED_CENTROID_ID (-1)
+#define VEC0_IVF_KMEANS_MAX_ITER 25
+#define VEC0_IVF_KMEANS_DEFAULT_SEED 0
+
+enum Vec0IvfQuantizer {
+  // a cell holds each float32 vector as is
+  VEC0_IVF_QUANTIZER_NONE = 0,
+  // a byte per dimension
+  VEC0_IVF_QUANTIZER_INT8 = 1,
+  // a bit per dimension
+  VEC0_IVF_QUANTIZER_BINARY = 2,
+};
+
+struct Vec0IvfConfig {
+  // the centroids compute-centroids makes; 0 leaves them to set-centroid
+  int nlist;
+  // the centroids whose cells a KNN query reads
+  int nprobe;
+  enum Vec0IvfQuantizer quantizer;
+  // with a quantizer, a KNN query ranks the k * oversample rows nearest by
+  // quantized distance by their exact distances
+  int oversample;
+};
+#endif
+
 struct VectorColumnDefinition {
   char *name;
   int name_length;
   size_t dimensions;
   enum VectorElementType element_type;
   enum Vec0DistanceMetrics distance_metric;
+  enum Vec0IndexType index_type;
+#if SQLITE_VEC_ENABLE_RESCORE
+  struct Vec0RescoreConfig rescore;
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+  struct Vec0DiskannConfig diskann;
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  struct Vec0IvfConfig ivf;
+#endif
 };
 
 struct Vec0PartitionColumnDefinition {
@@ -2814,6 +2969,301 @@ size_t vector_column_byte_size(struct VectorColumnDefinition column) {
   return vector_byte_size(column.element_type, column.dimensions);
 }
 
+#if SQLITE_VEC_ENABLE_RESCORE
+/**
+ * @brief Parses the options of `indexed by rescore(...)`, from after its '('
+ * through its ')': `quantizer=bit` or `quantizer=int8`, which is required, and
+ * `oversample=N` with N from 1 to 128, 8 when omitted, separated by commas.
+ *
+ * @return SQLITE_OK, or SQLITE_ERROR for any other text.
+ */
+static int vec0_parse_rescore_options(struct Vec0Scanner *scanner,
+                                      struct Vec0RescoreConfig *outConfig) {
+  struct Vec0Token token;
+  int hasQuantizer = 0;
+  outConfig->oversample = 8;
+  outConfig->oversample_search = 0;
+
+  int rc = vec0_scanner_next(scanner, &token);
+  if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+    return SQLITE_ERROR;
+  }
+  while (1) {
+    if (rc != VEC0_TOKEN_RESULT_SOME ||
+        token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      return SQLITE_ERROR;
+    }
+    struct Vec0Token key = token;
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_EQ) {
+      return SQLITE_ERROR;
+    }
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME) {
+      return SQLITE_ERROR;
+    }
+    if (vec0_token_is_keyword(&key, "quantizer", true)) {
+      if (token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        return SQLITE_ERROR;
+      }
+      if (vec0_token_is_keyword(&token, "bit", true)) {
+        outConfig->quantizer_type = VEC0_RESCORE_QUANTIZER_BIT;
+      } else if (vec0_token_is_keyword(&token, "int8", true)) {
+        outConfig->quantizer_type = VEC0_RESCORE_QUANTIZER_INT8;
+      } else {
+        return SQLITE_ERROR;
+      }
+      hasQuantizer = 1;
+    } else if (vec0_token_is_keyword(&key, "oversample", true)) {
+      if (token.token_type != TOKEN_TYPE_DIGIT) {
+        return SQLITE_ERROR;
+      }
+      errno = 0;
+      char *endptr;
+      long oversample = strtol(token.start, &endptr, 10);
+      if (errno == ERANGE || endptr != token.end || oversample < 1 ||
+          oversample > 128) {
+        return SQLITE_ERROR;
+      }
+      outConfig->oversample = (int)oversample;
+    } else {
+      return SQLITE_ERROR;
+    }
+
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_COMMA) {
+      return SQLITE_ERROR;
+    }
+    rc = vec0_scanner_next(scanner, &token);
+  }
+  return hasQuantizer ? SQLITE_OK : SQLITE_ERROR;
+}
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN || SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+/**
+ * @brief Reads the value of a numeric option of diskann() or ivf(): all
+ * digits, from min to max.
+ *
+ * @return SQLITE_OK, or SQLITE_ERROR for any other token.
+ */
+static int vec0_parse_option_int(const struct Vec0Token *token, long min,
+                                 long max, int *out) {
+  if (token->token_type != TOKEN_TYPE_DIGIT) {
+    return SQLITE_ERROR;
+  }
+  errno = 0;
+  char *endptr;
+  long value = strtol(token->start, &endptr, 10);
+  if (errno == ERANGE || endptr != token->end || value < min || value > max) {
+    return SQLITE_ERROR;
+  }
+  *out = (int)value;
+  return SQLITE_OK;
+}
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+/**
+ * @brief Parses the options of `indexed by diskann(...)`, from after its '('
+ * through its ')', separated by commas: `neighbor_quantizer=binary` or
+ * `neighbor_quantizer=int8`, which is required; `n_neighbors=N`, a multiple
+ * of 8 up to 256, 72 when omitted; `search_list_size=N`, 128 when omitted, or
+ * in its place `search_list_size_search=N` and `search_list_size_insert=N`;
+ * and `buffer_threshold=N`, 0 when omitted.
+ *
+ * @return SQLITE_OK, or SQLITE_ERROR for any other text.
+ */
+static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
+                                      struct Vec0DiskannConfig *outConfig) {
+  struct Vec0Token token;
+  int hasQuantizer = 0;
+  int hasSearchListSize = 0;
+  int hasSplitSearchListSize = 0;
+  outConfig->n_neighbors = VEC0_DISKANN_DEFAULT_N_NEIGHBORS;
+  outConfig->search_list_size = VEC0_DISKANN_DEFAULT_SEARCH_LIST_SIZE;
+  outConfig->search_list_size_search = 0;
+  outConfig->search_list_size_insert = 0;
+  outConfig->alpha = VEC0_DISKANN_DEFAULT_ALPHA;
+  outConfig->buffer_threshold = 0;
+
+  int rc = vec0_scanner_next(scanner, &token);
+  if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+    return SQLITE_ERROR;
+  }
+  while (1) {
+    if (rc != VEC0_TOKEN_RESULT_SOME ||
+        token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      return SQLITE_ERROR;
+    }
+    struct Vec0Token key = token;
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_EQ) {
+      return SQLITE_ERROR;
+    }
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME) {
+      return SQLITE_ERROR;
+    }
+    if (vec0_token_is_keyword(&key, "neighbor_quantizer", true)) {
+      if (token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        return SQLITE_ERROR;
+      }
+      if (vec0_token_is_keyword(&token, "binary", true)) {
+        outConfig->quantizer_type = VEC0_DISKANN_QUANTIZER_BINARY;
+      } else if (vec0_token_is_keyword(&token, "int8", true)) {
+        outConfig->quantizer_type = VEC0_DISKANN_QUANTIZER_INT8;
+      } else {
+        return SQLITE_ERROR;
+      }
+      hasQuantizer = 1;
+    } else if (vec0_token_is_keyword(&key, "n_neighbors", true)) {
+      if (vec0_parse_option_int(&token, 8, VEC0_DISKANN_MAX_N_NEIGHBORS,
+                                &outConfig->n_neighbors) != SQLITE_OK ||
+          outConfig->n_neighbors % 8 != 0) {
+        return SQLITE_ERROR;
+      }
+    } else if (vec0_token_is_keyword(&key, "search_list_size", true)) {
+      if (vec0_parse_option_int(&token, 1, INT_MAX,
+                                &outConfig->search_list_size) != SQLITE_OK) {
+        return SQLITE_ERROR;
+      }
+      hasSearchListSize = 1;
+    } else if (vec0_token_is_keyword(&key, "search_list_size_search", true)) {
+      if (vec0_parse_option_int(&token, 1, INT_MAX,
+                                &outConfig->search_list_size_search) !=
+          SQLITE_OK) {
+        return SQLITE_ERROR;
+      }
+      hasSplitSearchListSize = 1;
+    } else if (vec0_token_is_keyword(&key, "search_list_size_insert", true)) {
+      if (vec0_parse_option_int(&token, 1, INT_MAX,
+                                &outConfig->search_list_size_insert) !=
+          SQLITE_OK) {
+        return SQLITE_ERROR;
+      }
+      hasSplitSearchListSize = 1;
+    } else if (vec0_token_is_keyword(&key, "buffer_threshold", true)) {
+      if (vec0_parse_option_int(&token, 0, INT_MAX,
+                                &outConfig->buffer_threshold) != SQLITE_OK) {
+        return SQLITE_ERROR;
+      }
+    } else {
+      return SQLITE_ERROR;
+    }
+
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_COMMA) {
+      return SQLITE_ERROR;
+    }
+    rc = vec0_scanner_next(scanner, &token);
+  }
+  if (!hasQuantizer || (hasSearchListSize && hasSplitSearchListSize)) {
+    return SQLITE_ERROR;
+  }
+  return SQLITE_OK;
+}
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+/**
+ * @brief Parses the options of `indexed by ivf(...)`, from after its '('
+ * through its ')', separated by commas, each optional: `nlist=N` from 0 to
+ * 65536, 128 when omitted; `nprobe=N` from 1 to nlist, 10 when omitted or
+ * nlist when that is less; `quantizer=none`, `quantizer=int8` or
+ * `quantizer=binary`, none when omitted; and `oversample=N`, 1 when omitted,
+ * more only with a quantizer.
+ *
+ * @return SQLITE_OK, or SQLITE_ERROR for any other text.
+ */
+static int vec0_parse_ivf_options(struct Vec0Scanner *scanner,
+                                  struct Vec0IvfConfig *outConfig) {
+  struct Vec0Token token;
+  int hasNprobe = 0;
+  outConfig->nlist = VEC0_IVF_DEFAULT_NLIST;
+  outConfig->nprobe = VEC0_IVF_DEFAULT_NPROBE;
+  outConfig->quantizer = VEC0_IVF_QUANTIZER_NONE;
+  outConfig->oversample = 1;
+
+  int rc = vec0_scanner_next(scanner, &token);
+  int empty =
+      rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN;
+  while (!empty) {
+    if (rc != VEC0_TOKEN_RESULT_SOME ||
+        token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      return SQLITE_ERROR;
+    }
+    struct Vec0Token key = token;
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_EQ) {
+      return SQLITE_ERROR;
+    }
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME) {
+      return SQLITE_ERROR;
+    }
+    if (vec0_token_is_keyword(&key, "nlist", true)) {
+      if (vec0_parse_option_int(&token, 0, VEC0_IVF_MAX_NLIST,
+                                &outConfig->nlist) != SQLITE_OK) {
+        return SQLITE_ERROR;
+      }
+    } else if (vec0_token_is_keyword(&key, "nprobe", true)) {
+      if (vec0_parse_option_int(&token, 1, VEC0_IVF_MAX_NLIST,
+                                &outConfig->nprobe) != SQLITE_OK) {
+        return SQLITE_ERROR;
+      }
+      hasNprobe = 1;
+    } else if (vec0_token_is_keyword(&key, "quantizer", true)) {
+      if (token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        return SQLITE_ERROR;
+      }
+      if (vec0_token_is_keyword(&token, "none", true)) {
+        outConfig->quantizer = VEC0_IVF_QUANTIZER_NONE;
+      } else if (vec0_token_is_keyword(&token, "int8", true)) {
+        outConfig->quantizer = VEC0_IVF_QUANTIZER_INT8;
+      } else if (vec0_token_is_keyword(&token, "binary", true)) {
+        outConfig->quantizer = VEC0_IVF_QUANTIZER_BINARY;
+      } else {
+        return SQLITE_ERROR;
+      }
+    } else if (vec0_token_is_keyword(&key, "oversample", true)) {
+      if (vec0_parse_option_int(&token, 1, INT_MAX, &outConfig->oversample) !=
+          SQLITE_OK) {
+        return SQLITE_ERROR;
+      }
+    } else {
+      return SQLITE_ERROR;
+    }
+
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_COMMA) {
+      return SQLITE_ERROR;
+    }
+    rc = vec0_scanner_next(scanner, &token);
+  }
+  if (outConfig->nlist > 0 && outConfig->nprobe > outConfig->nlist) {
+    if (hasNprobe) {
+      return SQLITE_ERROR;
+    }
+    outConfig->nprobe = outConfig->nlist;
+  }
+  if (outConfig->oversample > 1 &&
+      outConfig->quantizer == VEC0_IVF_QUANTIZER_NONE) {
+    return SQLITE_ERROR;
+  }
+  return SQLITE_OK;
+}
+#endif
+
 /**
  * @brief Parse an vec0 vtab argv[i] column definition and see if
  * it's a vector column defintion, ex `contents_embedding float[768]`.
@@ -2842,6 +3292,19 @@ int vec0_parse_vector_column(const char *source, int source_length,
   int nameLength;
   enum VectorElementType elementType;
   enum Vec0DistanceMetrics distanceMetric = VEC0_DISTANCE_METRIC_L2;
+  enum Vec0IndexType indexType = VEC0_INDEX_TYPE_FLAT;
+#if SQLITE_VEC_ENABLE_RESCORE
+  struct Vec0RescoreConfig rescoreConfig;
+  memset(&rescoreConfig, 0, sizeof(rescoreConfig));
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+  struct Vec0DiskannConfig diskannConfig;
+  memset(&diskannConfig, 0, sizeof(diskannConfig));
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  struct Vec0IvfConfig ivfConfig;
+  memset(&ivfConfig, 0, sizeof(ivfConfig));
+#endif
   int dimensions;
 
   vec0_scanner_init(&scanner, source, source_length);
@@ -2951,6 +3414,92 @@ int vec0_parse_vector_column(const char *source, int source_length,
         return SQLITE_ERROR;
       }
     }
+    // `indexed by flat()` or `indexed by rescore(...)`. No table predates the
+    // clause, so its keywords match exactly whether or not the parse is strict.
+    else if (vec0_token_is_keyword(&token, "indexed", true)) {
+      rc = vec0_scanner_next(&scanner, &token);
+      if (rc != VEC0_TOKEN_RESULT_SOME ||
+          token.token_type != TOKEN_TYPE_IDENTIFIER ||
+          !vec0_token_is_keyword(&token, "by", true)) {
+        return SQLITE_ERROR;
+      }
+      rc = vec0_scanner_next(&scanner, &token);
+      if (rc != VEC0_TOKEN_RESULT_SOME ||
+          token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        return SQLITE_ERROR;
+      }
+      if (vec0_token_is_keyword(&token, "flat", true)) {
+        indexType = VEC0_INDEX_TYPE_FLAT;
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_LPAREN) {
+          return SQLITE_ERROR;
+        }
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_RPAREN) {
+          return SQLITE_ERROR;
+        }
+      }
+#if SQLITE_VEC_ENABLE_RESCORE
+      else if (vec0_token_is_keyword(&token, "rescore", true)) {
+        indexType = VEC0_INDEX_TYPE_RESCORE;
+        if (elementType != SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
+          return SQLITE_ERROR;
+        }
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_LPAREN) {
+          return SQLITE_ERROR;
+        }
+        if (vec0_parse_rescore_options(&scanner, &rescoreConfig) != SQLITE_OK) {
+          return SQLITE_ERROR;
+        }
+        if (rescoreConfig.quantizer_type == VEC0_RESCORE_QUANTIZER_BIT &&
+            (dimensions % CHAR_BIT) != 0) {
+          return SQLITE_ERROR;
+        }
+      }
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+      // vec0_init() refuses a bit column and a binary quantizer on dimensions
+      // that are not a multiple of 8, with messages of their own
+      else if (vec0_token_is_keyword(&token, "diskann", true)) {
+        indexType = VEC0_INDEX_TYPE_DISKANN;
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_LPAREN) {
+          return SQLITE_ERROR;
+        }
+        if (vec0_parse_diskann_options(&scanner, &diskannConfig) != SQLITE_OK) {
+          return SQLITE_ERROR;
+        }
+      }
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+      else if (vec0_token_is_keyword(&token, "ivf", true)) {
+        indexType = VEC0_INDEX_TYPE_IVF;
+        if (elementType != SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
+          return SQLITE_ERROR;
+        }
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_LPAREN) {
+          return SQLITE_ERROR;
+        }
+        if (vec0_parse_ivf_options(&scanner, &ivfConfig) != SQLITE_OK) {
+          return SQLITE_ERROR;
+        }
+        if (ivfConfig.quantizer == VEC0_IVF_QUANTIZER_BINARY &&
+            (dimensions % CHAR_BIT) != 0) {
+          return SQLITE_ERROR;
+        }
+      }
+#endif
+      else {
+        return SQLITE_ERROR;
+      }
+    }
     // unknown key
     else {
       return SQLITE_ERROR;
@@ -2965,6 +3514,16 @@ int vec0_parse_vector_column(const char *source, int source_length,
   outColumn->distance_metric = distanceMetric;
   outColumn->element_type = elementType;
   outColumn->dimensions = dimensions;
+  outColumn->index_type = indexType;
+#if SQLITE_VEC_ENABLE_RESCORE
+  outColumn->rescore = rescoreConfig;
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+  outColumn->diskann = diskannConfig;
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  outColumn->ivf = ivfConfig;
+#endif
   return SQLITE_OK;
 }
 
@@ -4120,6 +4679,40 @@ struct vec0_vtab {
   // The first numMetadataColumns entries must be freed with sqlite3_free()
   char *shadowMetadataChunksNames[VEC0_MAX_METADATA_COLUMNS];
 
+#if SQLITE_VEC_ENABLE_RESCORE
+  // Name of the rescore chunk shadow table of each vector column indexed by
+  // rescore(), ie `_rescore_chunks00`, holding its quantized vectors in the
+  // _vector_chunks layout. NULL for other columns; freed with sqlite3_free().
+  char *shadowRescoreChunksNames[VEC0_MAX_VECTOR_COLUMNS];
+
+  // Name of the rescore vector shadow table of each vector column indexed by
+  // rescore(), ie `_rescore_vectors00`, holding its float32 vectors by rowid.
+  // NULL for other columns; freed with sqlite3_free().
+  char *shadowRescoreVectorsNames[VEC0_MAX_VECTOR_COLUMNS];
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+  // Names of the shadow tables of each vector column indexed by diskann(), ie
+  // `_vectors00` with its vectors by rowid, `_diskann_nodes00` with the graph,
+  // one row per node, and `_diskann_buffer00` with the vectors waiting to join
+  // it. NULL for other columns; freed with sqlite3_free().
+  char *shadowDiskannVectorsNames[VEC0_MAX_VECTOR_COLUMNS];
+  char *shadowDiskannNodesNames[VEC0_MAX_VECTOR_COLUMNS];
+  char *shadowDiskannBufferNames[VEC0_MAX_VECTOR_COLUMNS];
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  // Names of the shadow tables of each vector column indexed by ivf(), ie
+  // `_ivf_centroids00` with its centroids, `_ivf_cells00` with its vectors in
+  // cells, `_ivf_rowid_map00` with each row's cell and slot, and, with a
+  // quantizer, `_ivf_vectors00` with its float32 vectors by rowid. NULL for
+  // other columns; freed with sqlite3_free().
+  char *shadowIvfCentroidsNames[VEC0_MAX_VECTOR_COLUMNS];
+  char *shadowIvfCellsNames[VEC0_MAX_VECTOR_COLUMNS];
+  char *shadowIvfRowidMapNames[VEC0_MAX_VECTOR_COLUMNS];
+  char *shadowIvfVectorsNames[VEC0_MAX_VECTOR_COLUMNS];
+#endif
+
   struct VectorColumnDefinition vector_columns[VEC0_MAX_VECTOR_COLUMNS];
   struct Vec0PartitionColumnDefinition
       paritition_columns[VEC0_MAX_PARTITION_COLUMNS];
@@ -4185,6 +4778,42 @@ struct vec0_vtab {
    * Must be cleaned up with sqlite3_finalize().
    */
   sqlite3_stmt *stmtRowidsGetChunkPosition;
+
+#if SQLITE_VEC_ENABLE_DISKANN
+  // Statements a graph search runs once per node it visits, for each vector
+  // column indexed by diskann(): reading a node's row of _diskann_nodesNN,
+  // writing it, and reading and writing a vector's row of _vectorsNN. Each is
+  // prepared on first use and reset after every use.
+  sqlite3_stmt *stmtDiskannNodeRead[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtDiskannNodeWrite[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtDiskannVectorRead[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtDiskannVectorWrite[VEC0_MAX_VECTOR_COLUMNS];
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  // Statements the inserts, deletes and queries of each vector column indexed
+  // by ivf() run, each prepared on first use and reset after every use.
+  struct {
+    // the first cell of a centroid with a free slot
+    sqlite3_stmt *cellFind;
+    // the cells of a centroid
+    sqlite3_stmt *cellScan;
+    // adds to a cell's count of rows
+    sqlite3_stmt *cellCount;
+    // a row's cell and slot, in _ivf_rowid_mapNN
+    sqlite3_stmt *mapRead;
+    sqlite3_stmt *mapWrite;
+    sqlite3_stmt *mapDelete;
+    // a row's float32 vector, in _ivf_vectorsNN
+    sqlite3_stmt *vectorRead;
+    sqlite3_stmt *vectorWrite;
+    sqlite3_stmt *vectorDelete;
+    // every centroid
+    sqlite3_stmt *centroids;
+    // the column's ivf_trained_N row of _info
+    sqlite3_stmt *trained;
+  } ivfStmts[VEC0_MAX_VECTOR_COLUMNS];
+#endif
 };
 
 /**
@@ -4203,6 +4832,34 @@ void vec0_free_resources(vec0_vtab *p) {
   p->stmtRowidsUpdatePosition = NULL;
   sqlite3_finalize(p->stmtRowidsGetChunkPosition);
   p->stmtRowidsGetChunkPosition = NULL;
+#if SQLITE_VEC_ENABLE_DISKANN
+  for (int i = 0; i < VEC0_MAX_VECTOR_COLUMNS; i++) {
+    sqlite3_finalize(p->stmtDiskannNodeRead[i]);
+    p->stmtDiskannNodeRead[i] = NULL;
+    sqlite3_finalize(p->stmtDiskannNodeWrite[i]);
+    p->stmtDiskannNodeWrite[i] = NULL;
+    sqlite3_finalize(p->stmtDiskannVectorRead[i]);
+    p->stmtDiskannVectorRead[i] = NULL;
+    sqlite3_finalize(p->stmtDiskannVectorWrite[i]);
+    p->stmtDiskannVectorWrite[i] = NULL;
+  }
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  for (int i = 0; i < VEC0_MAX_VECTOR_COLUMNS; i++) {
+    sqlite3_stmt **stmts[] = {
+        &p->ivfStmts[i].cellFind,     &p->ivfStmts[i].cellScan,
+        &p->ivfStmts[i].cellCount,    &p->ivfStmts[i].mapRead,
+        &p->ivfStmts[i].mapWrite,     &p->ivfStmts[i].mapDelete,
+        &p->ivfStmts[i].vectorRead,   &p->ivfStmts[i].vectorWrite,
+        &p->ivfStmts[i].vectorDelete, &p->ivfStmts[i].centroids,
+        &p->ivfStmts[i].trained,
+    };
+    for (size_t j = 0; j < countof(stmts); j++) {
+      sqlite3_finalize(*stmts[j]);
+      *stmts[j] = NULL;
+    }
+  }
+#endif
 }
 
 /**
@@ -4227,6 +4884,30 @@ void vec0_free(vec0_vtab *p) {
   for (int i = 0; i < p->numVectorColumns; i++) {
     sqlite3_free(p->shadowVectorChunksNames[i]);
     p->shadowVectorChunksNames[i] = NULL;
+#if SQLITE_VEC_ENABLE_RESCORE
+    sqlite3_free(p->shadowRescoreChunksNames[i]);
+    p->shadowRescoreChunksNames[i] = NULL;
+    sqlite3_free(p->shadowRescoreVectorsNames[i]);
+    p->shadowRescoreVectorsNames[i] = NULL;
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+    sqlite3_free(p->shadowDiskannVectorsNames[i]);
+    p->shadowDiskannVectorsNames[i] = NULL;
+    sqlite3_free(p->shadowDiskannNodesNames[i]);
+    p->shadowDiskannNodesNames[i] = NULL;
+    sqlite3_free(p->shadowDiskannBufferNames[i]);
+    p->shadowDiskannBufferNames[i] = NULL;
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+    sqlite3_free(p->shadowIvfCentroidsNames[i]);
+    p->shadowIvfCentroidsNames[i] = NULL;
+    sqlite3_free(p->shadowIvfCellsNames[i]);
+    p->shadowIvfCellsNames[i] = NULL;
+    sqlite3_free(p->shadowIvfRowidMapNames[i]);
+    p->shadowIvfRowidMapNames[i] = NULL;
+    sqlite3_free(p->shadowIvfVectorsNames[i]);
+    p->shadowIvfVectorsNames[i] = NULL;
+#endif
     sqlite3_free(p->vector_columns[i].name);
     p->vector_columns[i].name = NULL;
   }
@@ -4252,6 +4933,20 @@ int vec0_num_defined_user_columns(vec0_vtab *p) {
   return p->numVectorColumns + p->numPartitionColumns + p->numAuxiliaryColumns +
          p->numMetadataColumns;
 }
+
+#if SQLITE_VEC_ENABLE_RESCORE
+static int rescore_new_chunk(vec0_vtab *p, i64 chunk_rowid);
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+static int diskann_vector_read(vec0_vtab *p, int vec_col_idx, i64 rowid,
+                               void **outVector, int *outVectorSize);
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+static int ivf_vector_read(vec0_vtab *p, int i, i64 rowid, void **outVector,
+                           int *outVectorSize);
+#endif
 
 /**
  * @brief Returns the index of the distance hidden column for the given vec0
@@ -4585,9 +5280,55 @@ int vec0_get_vector_data(vec0_vtab *pVtab, i64 rowid, int vector_column_idx,
     goto cleanup;
   }
 
-  rc = sqlite3_blob_open(p->db, p->schemaName,
-                         p->shadowVectorChunksNames[vector_column_idx],
-                         "vectors", chunk_id, 0, &vectorBlob);
+#if SQLITE_VEC_ENABLE_DISKANN
+  // a diskann() column keeps each vector in its row of _vectorsNN
+  if (p->vector_columns[vector_column_idx].index_type ==
+      VEC0_INDEX_TYPE_DISKANN) {
+    rc = diskann_vector_read(p, vector_column_idx, rowid, outVector,
+                             outVectorSize);
+    if (rc != SQLITE_OK) {
+      vtab_set_error(&pVtab->base,
+                     "Could not fetch vector data for %lld from the DiskANN "
+                     "vectors table",
+                     rowid);
+      rc = rc == SQLITE_EMPTY ? SQLITE_ERROR : vec0_error_rc(rc);
+    }
+    goto cleanup;
+  }
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  // an ivf() column keeps each float32 vector in a cell, or, with a
+  // quantizer, in its row of _ivf_vectorsNN
+  if (p->vector_columns[vector_column_idx].index_type == VEC0_INDEX_TYPE_IVF) {
+    rc = ivf_vector_read(p, vector_column_idx, rowid, outVector, outVectorSize);
+    if (rc != SQLITE_OK) {
+      vtab_set_error(&pVtab->base,
+                     "Could not fetch vector data for %lld from the IVF index",
+                     rowid);
+      rc = rc == SQLITE_EMPTY ? SQLITE_ERROR : vec0_error_rc(rc);
+    }
+    goto cleanup;
+  }
+#endif
+
+  size = vector_column_byte_size(pVtab->vector_columns[vector_column_idx]);
+#if SQLITE_VEC_ENABLE_RESCORE
+  // a rescore() column keeps each float32 vector in a row of its own
+  if (p->vector_columns[vector_column_idx].index_type ==
+      VEC0_INDEX_TYPE_RESCORE) {
+    rc = sqlite3_blob_open(p->db, p->schemaName,
+                           p->shadowRescoreVectorsNames[vector_column_idx],
+                           "vector", rowid, 0, &vectorBlob);
+    blobOffset = 0;
+  } else
+#endif
+  {
+    rc = sqlite3_blob_open(p->db, p->schemaName,
+                           p->shadowVectorChunksNames[vector_column_idx],
+                           "vectors", chunk_id, 0, &vectorBlob);
+    blobOffset = chunk_offset * size;
+  }
 
   if (rc != SQLITE_OK) {
     vtab_set_error(&pVtab->base,
@@ -4596,9 +5337,6 @@ int vec0_get_vector_data(vec0_vtab *pVtab, i64 rowid, int vector_column_idx,
     rc = vec0_error_rc(rc);
     goto cleanup;
   }
-
-  size = vector_column_byte_size(pVtab->vector_columns[vector_column_idx]);
-  blobOffset = chunk_offset * size;
 
   buf = sqlite3_malloc(size);
   if (!buf) {
@@ -5107,7 +5845,8 @@ cleanup:
  * chunks.
  *
  * Inserts a new row into the _chunks table, with blank data, and uses that new
- * rowid to insert new blank rows into _vector_chunksXX tables.
+ * rowid to insert new blank rows into _vector_chunksXX tables, or into the
+ * _rescore_chunksXX tables of columns indexed by rescore().
  *
  * @param p: vec0 table to add new chunk
  * @param paritionKeyValues: Array of partition key valeus for the new chunk, if
@@ -5190,6 +5929,11 @@ int vec0_new_chunk(vec0_vtab *p, sqlite3_value **partitionKeyValues,
       continue;
     }
     int vector_column_idx = p->user_column_idxs[i];
+    // a column indexed by anything but flat() keeps its vectors elsewhere
+    if (p->vector_columns[vector_column_idx].index_type !=
+        VEC0_INDEX_TYPE_FLAT) {
+      continue;
+    }
     i64 vectorsSize = p->chunk_size * vector_column_byte_size(
                                           p->vector_columns[vector_column_idx]);
 
@@ -5224,6 +5968,13 @@ int vec0_new_chunk(vec0_vtab *p, sqlite3_value **partitionKeyValues,
       return rc;
     }
   }
+
+#if SQLITE_VEC_ENABLE_RESCORE
+  rc = rescore_new_chunk(p, rowid);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+#endif
 
   // Step 3: Create new metadata chunks for each metadata column
   for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
@@ -5441,6 +6192,26 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
             (i64)vecColumn.dimensions, SQLITE_VEC_VEC0_MAX_DIMENSIONS);
         goto error;
       }
+#if SQLITE_VEC_ENABLE_DISKANN
+      if (vecColumn.index_type == VEC0_INDEX_TYPE_DISKANN) {
+        const char *zDiskannError = NULL;
+        if (vecColumn.element_type == SQLITE_VEC_ELEMENT_TYPE_BIT) {
+          zDiskannError =
+              "DiskANN index is not supported on bit vector columns";
+        } else if (vecColumn.diskann.quantizer_type ==
+                       VEC0_DISKANN_QUANTIZER_BINARY &&
+                   (vecColumn.dimensions % CHAR_BIT) != 0) {
+          zDiskannError =
+              "DiskANN with binary quantizer requires dimensions divisible "
+              "by 8";
+        }
+        if (zDiskannError) {
+          sqlite3_free(vecColumn.name);
+          *pzErr = sqlite3_mprintf(VEC_CONSTRUCTOR_ERROR "%s", zDiskannError);
+          goto error;
+        }
+      }
+#endif
       pNew->user_column_kinds[user_column_idx] =
           SQLITE_VEC0_USER_COLUMN_KIND_VECTOR;
       pNew->user_column_idxs[user_column_idx] = numVectorColumns;
@@ -5621,6 +6392,70 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     goto error;
   }
 
+#if SQLITE_VEC_ENABLE_RESCORE
+  for (int i = 0; i < numVectorColumns; i++) {
+    if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE) {
+      continue;
+    }
+    if (numMetadataColumns > 0) {
+      *pzErr = sqlite3_mprintf(
+          VEC_CONSTRUCTOR_ERROR
+          "Metadata columns are not supported with rescore indexes");
+      goto error;
+    }
+    if (numPartitionColumns > 0) {
+      *pzErr = sqlite3_mprintf(
+          VEC_CONSTRUCTOR_ERROR
+          "Partition key columns are not supported with rescore indexes");
+      goto error;
+    }
+  }
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+  // a graph search reaches the nearest vectors of the whole column, so no
+  // filter of a metadata column or partition key could apply before its k
+  for (int i = 0; i < numVectorColumns; i++) {
+    if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
+      continue;
+    }
+    if (numMetadataColumns > 0) {
+      *pzErr = sqlite3_mprintf(VEC_CONSTRUCTOR_ERROR
+                               "Metadata columns are not supported with "
+                               "DiskANN-indexed vector columns");
+      goto error;
+    }
+    if (numPartitionColumns > 0) {
+      *pzErr = sqlite3_mprintf(VEC_CONSTRUCTOR_ERROR
+                               "Partition key columns are not supported with "
+                               "DiskANN-indexed vector columns");
+      goto error;
+    }
+  }
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  // a KNN query reads the cells of the centroids nearest its vector, so no
+  // filter of a metadata column or partition key could apply before its k
+  for (int i = 0; i < numVectorColumns; i++) {
+    if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_IVF) {
+      continue;
+    }
+    if (numMetadataColumns > 0) {
+      *pzErr = sqlite3_mprintf(
+          VEC_CONSTRUCTOR_ERROR
+          "metadata columns are not supported with IVF indexes");
+      goto error;
+    }
+    if (numPartitionColumns > 0) {
+      *pzErr = sqlite3_mprintf(
+          VEC_CONSTRUCTOR_ERROR
+          "partition key columns are not supported with IVF indexes");
+      goto error;
+    }
+  }
+#endif
+
   const char *schemaName = argv[1];
   const char *tableName = argv[2];
 
@@ -5753,6 +6588,51 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     if (!pNew->shadowVectorChunksNames[i]) {
       goto error;
     }
+#if SQLITE_VEC_ENABLE_RESCORE
+    if (pNew->vector_columns[i].index_type == VEC0_INDEX_TYPE_RESCORE) {
+      pNew->shadowRescoreChunksNames[i] =
+          sqlite3_mprintf("%s_rescore_chunks%02d", tableName, i);
+      if (!pNew->shadowRescoreChunksNames[i]) {
+        goto error;
+      }
+      pNew->shadowRescoreVectorsNames[i] =
+          sqlite3_mprintf("%s_rescore_vectors%02d", tableName, i);
+      if (!pNew->shadowRescoreVectorsNames[i]) {
+        goto error;
+      }
+    }
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+    if (pNew->vector_columns[i].index_type == VEC0_INDEX_TYPE_DISKANN) {
+      pNew->shadowDiskannVectorsNames[i] =
+          sqlite3_mprintf("%s_vectors%02d", tableName, i);
+      pNew->shadowDiskannNodesNames[i] =
+          sqlite3_mprintf("%s_diskann_nodes%02d", tableName, i);
+      pNew->shadowDiskannBufferNames[i] =
+          sqlite3_mprintf("%s_diskann_buffer%02d", tableName, i);
+      if (!pNew->shadowDiskannVectorsNames[i] ||
+          !pNew->shadowDiskannNodesNames[i] ||
+          !pNew->shadowDiskannBufferNames[i]) {
+        goto error;
+      }
+    }
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+    if (pNew->vector_columns[i].index_type == VEC0_INDEX_TYPE_IVF) {
+      pNew->shadowIvfCentroidsNames[i] =
+          sqlite3_mprintf("%s_ivf_centroids%02d", tableName, i);
+      pNew->shadowIvfCellsNames[i] =
+          sqlite3_mprintf("%s_ivf_cells%02d", tableName, i);
+      pNew->shadowIvfRowidMapNames[i] =
+          sqlite3_mprintf("%s_ivf_rowid_map%02d", tableName, i);
+      pNew->shadowIvfVectorsNames[i] =
+          sqlite3_mprintf("%s_ivf_vectors%02d", tableName, i);
+      if (!pNew->shadowIvfCentroidsNames[i] || !pNew->shadowIvfCellsNames[i] ||
+          !pNew->shadowIvfRowidMapNames[i] || !pNew->shadowIvfVectorsNames[i]) {
+        goto error;
+      }
+    }
+#endif
   }
   for (int i = 0; i < pNew->numMetadataColumns; i++) {
     pNew->shadowMetadataChunksNames[i] =
@@ -5878,6 +6758,10 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     sqlite3_finalize(stmt);
 
     for (int i = 0; i < pNew->numVectorColumns; i++) {
+      // a column indexed by anything but flat() keeps its vectors elsewhere
+      if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_FLAT) {
+        continue;
+      }
       char *zSql = sqlite3_mprintf(VEC0_SHADOW_VECTOR_N_CREATE,
                                    pNew->schemaName, pNew->tableName, i);
       if (!zSql) {
@@ -5895,6 +6779,179 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       }
       sqlite3_finalize(stmt);
     }
+
+#if SQLITE_VEC_ENABLE_RESCORE
+    for (int i = 0; i < pNew->numVectorColumns; i++) {
+      if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE) {
+        continue;
+      }
+      const char *zCreate[] = {
+          "CREATE TABLE \"%w\".\"%w_rescore_chunks%02d\""
+          "(rowid INTEGER PRIMARY KEY, vectors BLOB NOT NULL)",
+          "CREATE TABLE \"%w\".\"%w_rescore_vectors%02d\""
+          "(rowid INTEGER PRIMARY KEY, vector BLOB NOT NULL)",
+      };
+      const char *zShadow[] = {"_rescore_chunks", "_rescore_vectors"};
+      for (size_t j = 0; j < countof(zCreate); j++) {
+        char *zSql =
+            sqlite3_mprintf(zCreate[j], pNew->schemaName, pNew->tableName, i);
+        if (!zSql) {
+          goto error;
+        }
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free((void *)zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf("Could not create '%s%02d' shadow table: %s",
+                                   zShadow[j], i, sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+    }
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+    for (int i = 0; i < pNew->numVectorColumns; i++) {
+      if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
+        continue;
+      }
+      // the declarations asg017's DiskANN writes, so either opens the other's
+      // tables
+      const char *zCreate[] = {
+          "CREATE TABLE \"%w\".\"%w_vectors%02d\""
+          " (rowid INTEGER PRIMARY KEY, vector BLOB NOT NULL)",
+          "CREATE TABLE \"%w\".\"%w_diskann_nodes%02d\""
+          " (rowid INTEGER PRIMARY KEY, neighbors_validity BLOB NOT NULL, "
+          "neighbor_ids BLOB NOT NULL, neighbor_quantized_vectors BLOB NOT "
+          "NULL)",
+          "CREATE TABLE \"%w\".\"%w_diskann_buffer%02d\""
+          " (rowid INTEGER PRIMARY KEY, vector BLOB NOT NULL)",
+      };
+      const char *zShadow[] = {"_vectors", "_diskann_nodes", "_diskann_buffer"};
+      for (size_t j = 0; j < countof(zCreate); j++) {
+        char *zSql =
+            sqlite3_mprintf(zCreate[j], pNew->schemaName, pNew->tableName, i);
+        if (!zSql) {
+          goto error;
+        }
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free((void *)zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf("Could not create '%s%02d' shadow table: %s",
+                                   zShadow[j], i, sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+
+      // the graph's entry point, NULL while the graph is empty
+      char *zSql = sqlite3_mprintf("INSERT INTO " VEC0_SHADOW_INFO_NAME
+                                   "(key, value) VALUES (?, NULL)",
+                                   pNew->schemaName, pNew->tableName);
+      char *zKey = sqlite3_mprintf("diskann_medoid_%02d", i);
+      if (!zSql || !zKey) {
+        sqlite3_free(zSql);
+        sqlite3_free(zKey);
+        goto error;
+      }
+      rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+      sqlite3_free(zSql);
+      if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, zKey, -1, sqlite3_free);
+      } else {
+        sqlite3_free(zKey);
+      }
+      if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+        sqlite3_finalize(stmt);
+        *pzErr = sqlite3_mprintf("Could not seed '_info' shadow table: %s",
+                                 sqlite3_errmsg(db));
+        goto error;
+      }
+      sqlite3_finalize(stmt);
+    }
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+    for (int i = 0; i < pNew->numVectorColumns; i++) {
+      if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_IVF) {
+        continue;
+      }
+      // asg017's declarations, except that the cells are found by centroid
+      // through the index of a UNIQUE constraint, which ALTER TABLE RENAME
+      // renames along with its table: an index from CREATE INDEX keeps its
+      // name through a rename, and nothing inside xRename can drop it, so a
+      // table created later under the old name could not create its own.
+      // Every statement on the cells names its columns and addresses a cell by
+      // rowid, so either implementation opens the other's tables.
+      const char *zCreate[] = {
+          "CREATE TABLE \"%w\".\"%w_ivf_centroids%02d\""
+          " (centroid_id INTEGER PRIMARY KEY, centroid BLOB NOT NULL)",
+          "CREATE TABLE \"%w\".\"%w_ivf_cells%02d\""
+          " (cell_id INTEGER PRIMARY KEY,"
+          "  centroid_id INTEGER NOT NULL,"
+          "  n_vectors INTEGER NOT NULL DEFAULT 0,"
+          "  validity BLOB NOT NULL,"
+          "  rowids BLOB NOT NULL,"
+          "  vectors BLOB NOT NULL,"
+          "  UNIQUE (centroid_id, cell_id))",
+          "CREATE TABLE \"%w\".\"%w_ivf_rowid_map%02d\""
+          " (rowid INTEGER PRIMARY KEY, cell_id INTEGER NOT NULL,"
+          " slot INTEGER NOT NULL)",
+          "CREATE TABLE \"%w\".\"%w_ivf_vectors%02d\""
+          " (rowid INTEGER PRIMARY KEY, vector BLOB NOT NULL)",
+      };
+      const char *zShadow[] = {"_ivf_centroids", "_ivf_cells", "_ivf_rowid_map",
+                               "_ivf_vectors"};
+      // without a quantizer, the cells hold the float32 vectors themselves
+      size_t nCreate =
+          pNew->vector_columns[i].ivf.quantizer == VEC0_IVF_QUANTIZER_NONE
+              ? countof(zCreate) - 1
+              : countof(zCreate);
+      for (size_t j = 0; j < nCreate; j++) {
+        char *zSql =
+            sqlite3_mprintf(zCreate[j], pNew->schemaName, pNew->tableName, i);
+        if (!zSql) {
+          goto error;
+        }
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free((void *)zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf("Could not create '%s%02d' shadow table: %s",
+                                   zShadow[j], i, sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+
+      // set when the column has centroids
+      char *zSql = sqlite3_mprintf("INSERT INTO " VEC0_SHADOW_INFO_NAME
+                                   "(key, value) VALUES (?, '0')",
+                                   pNew->schemaName, pNew->tableName);
+      char *zKey = sqlite3_mprintf("ivf_trained_%d", i);
+      if (!zSql || !zKey) {
+        sqlite3_free(zSql);
+        sqlite3_free(zKey);
+        goto error;
+      }
+      rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+      sqlite3_free(zSql);
+      if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, zKey, -1, sqlite3_free);
+      } else {
+        sqlite3_free(zKey);
+      }
+      if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+        sqlite3_finalize(stmt);
+        *pzErr = sqlite3_mprintf("Could not seed '_info' shadow table: %s",
+                                 sqlite3_errmsg(db));
+        goto error;
+      }
+      sqlite3_finalize(stmt);
+    }
+#endif
 
     for (int i = 0; i < pNew->numMetadataColumns; i++) {
       char *zSql =
@@ -6038,15 +7095,44 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
   sqlite3_finalize(stmt);
 
   for (int i = 0; i < p->numVectorColumns; i++) {
-    zSql = sqlite3_mprintf("DROP TABLE \"%w\".\"%w\"", p->schemaName,
-                           p->shadowVectorChunksNames[i]);
-    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
-    sqlite3_free((void *)zSql);
-    if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
-      rc = SQLITE_ERROR;
-      goto done;
+    const char *shadowNames[] = {
+        p->vector_columns[i].index_type == VEC0_INDEX_TYPE_FLAT
+            ? p->shadowVectorChunksNames[i]
+            : NULL,
+#if SQLITE_VEC_ENABLE_RESCORE
+        p->shadowRescoreChunksNames[i],
+        p->shadowRescoreVectorsNames[i],
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+        p->shadowDiskannVectorsNames[i],
+        p->shadowDiskannNodesNames[i],
+        p->shadowDiskannBufferNames[i],
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+        // dropping _ivf_cellsNN drops its index
+        p->shadowIvfCentroidsNames[i],
+        p->shadowIvfCellsNames[i],
+        p->shadowIvfRowidMapNames[i],
+        p->vector_columns[i].index_type == VEC0_INDEX_TYPE_IVF &&
+                p->vector_columns[i].ivf.quantizer != VEC0_IVF_QUANTIZER_NONE
+            ? p->shadowIvfVectorsNames[i]
+            : NULL,
+#endif
+    };
+    for (size_t j = 0; j < countof(shadowNames); j++) {
+      if (!shadowNames[j]) {
+        continue;
+      }
+      zSql = sqlite3_mprintf("DROP TABLE \"%w\".\"%w\"", p->schemaName,
+                             shadowNames[j]);
+      rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
+      sqlite3_free((void *)zSql);
+      if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+        rc = SQLITE_ERROR;
+        goto done;
+      }
+      sqlite3_finalize(stmt);
     }
-    sqlite3_finalize(stmt);
   }
 
   if (p->numAuxiliaryColumns > 0) {
@@ -8924,6 +10010,4336 @@ static int vec0_knn_rowids_append(vec0_vtab *p, sqlite3_value *value,
   return array_append(rowids, &rowid);
 }
 
+#if SQLITE_VEC_ENABLE_RESCORE || SQLITE_VEC_ENABLE_DISKANN ||                  \
+    SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+/**
+ * Keeps those of the first *n candidates, rowids and distances in step, whose
+ * distance meets every distance constraint of the KNN query, in their order,
+ * and sets *n to their number.
+ */
+static void vec0_knn_keep_within_distance(const char *idxStr, int argc,
+                                          sqlite3_value **argv, i64 *rowids,
+                                          f32 *distances, i64 *n) {
+  for (int c = 0; c < argc; c++) {
+    int idx = 1 + (c * 4);
+    if (idxStr[idx + 0] != VEC0_IDXSTR_KIND_KNN_DISTANCE_CONSTRAINT) {
+      continue;
+    }
+    vec0_distance_constraint_operator op = idxStr[idx + 1];
+    int type = sqlite3_value_type(argv[c]);
+    if (type != SQLITE_INTEGER && type != SQLITE_FLOAT) {
+      // No distance compares with NULL, and every distance is less than any
+      // TEXT or BLOB.
+      int keep = type != SQLITE_NULL && (op == VEC0_DISTANCE_CONSTRAINT_LT ||
+                                         op == VEC0_DISTANCE_CONSTRAINT_LE);
+      if (!keep) {
+        *n = 0;
+      }
+      continue;
+    }
+    f32 target = (f32)sqlite3_value_double(argv[c]);
+    i64 kept = 0;
+    for (i64 j = 0; j < *n; j++) {
+      int pass;
+      switch (op) {
+      case VEC0_DISTANCE_CONSTRAINT_GE:
+        pass = distances[j] >= target;
+        break;
+      case VEC0_DISTANCE_CONSTRAINT_GT:
+        pass = distances[j] > target;
+        break;
+      case VEC0_DISTANCE_CONSTRAINT_LE:
+        pass = distances[j] <= target;
+        break;
+      case VEC0_DISTANCE_CONSTRAINT_LT:
+        pass = distances[j] < target;
+        break;
+      default:
+        pass = 1;
+        break;
+      }
+      if (pass) {
+        rowids[kept] = rowids[j];
+        distances[kept] = distances[j];
+        kept++;
+      }
+    }
+    *n = kept;
+  }
+}
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN || SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+/**
+ * Prepares *pStmt from zFormat, which names the schema and then zTable, unless
+ * a previous call prepared it.
+ */
+static int vec0_cached_stmt(vec0_vtab *p, sqlite3_stmt **pStmt,
+                            const char *zFormat, const char *zTable) {
+  if (*pStmt) {
+    return SQLITE_OK;
+  }
+  char *zSql = sqlite3_mprintf(zFormat, p->schemaName, zTable);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_prepare_v2(p->db, zSql, -1, pStmt, NULL);
+  sqlite3_free(zSql);
+  return rc;
+}
+
+/**
+ * Runs zFormat, a statement on table zTable of the schema whose one parameter
+ * is value, to its end.
+ */
+static int vec0_exec_i64(vec0_vtab *p, const char *zFormat, const char *zTable,
+                         i64 value) {
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf(zFormat, p->schemaName, zTable);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_bind_int64(stmt, 1, value);
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+#endif
+
+#if SQLITE_VEC_ENABLE_RESCORE
+// A vector column indexed by rescore() keeps two shadow tables:
+// _rescore_chunksNN holds its vectors quantized, in the layout of
+// _vector_chunksNN, for the KNN to scan, and _rescore_vectorsNN holds its
+// float32 vectors by rowid, for the KNN to rank the candidates the scan finds.
+// https://github.com/asg017/sqlite-vec/blob/04d28bd/sqlite-vec-rescore.c
+
+size_t rescore_quantized_byte_size(struct VectorColumnDefinition *col) {
+  switch (col->rescore.quantizer_type) {
+  case VEC0_RESCORE_QUANTIZER_BIT:
+    return col->dimensions / CHAR_BIT;
+  case VEC0_RESCORE_QUANTIZER_INT8:
+    return col->dimensions;
+  default:
+    return 0;
+  }
+}
+
+// One bit per dimension, set when the value is >= 0.
+void rescore_quantize_float_to_bit(const float *src, uint8_t *dst,
+                                   size_t dimensions) {
+  memset(dst, 0, dimensions / CHAR_BIT);
+  for (size_t i = 0; i < dimensions; i++) {
+    if (src[i] >= 0.0f) {
+      dst[i / CHAR_BIT] |= (1 << (i % CHAR_BIT));
+    }
+  }
+}
+
+// Maps [-1, 1] onto [-128, 127] in steps of 2/255, truncating toward zero, and
+// clamps values outside it, NaN to 127.
+void rescore_quantize_float_to_int8(const float *src, int8_t *dst,
+                                    size_t dimensions) {
+  float step = 2.0f / 255.0f;
+  for (size_t i = 0; i < dimensions; i++) {
+    float v = (src[i] - (-1.0f)) / step - 128.0f;
+    if (!(v <= 127.0f))
+      v = 127.0f;
+    if (!(v >= -128.0f))
+      v = -128.0f;
+    dst[i] = (int8_t)v;
+  }
+}
+
+/**
+ * Inserts the row of chunk chunk_rowid, its quantized vectors zeroed, into the
+ * _rescore_chunksNN table of each column indexed by rescore().
+ */
+static int rescore_new_chunk(vec0_vtab *p, i64 chunk_rowid) {
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE) {
+      continue;
+    }
+    size_t quantized_size = rescore_quantized_byte_size(&p->vector_columns[i]);
+    i64 blob_size = (i64)p->chunk_size * (i64)quantized_size;
+
+    char *zSql = sqlite3_mprintf(
+        "INSERT INTO \"%w\".\"%w\"(rowid, vectors) VALUES (?, ?)",
+        p->schemaName, p->shadowRescoreChunksNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      sqlite3_finalize(stmt);
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, chunk_rowid);
+    sqlite3_bind_zeroblob64(stmt, 2, blob_size);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+      return vec0_error_rc(rc);
+    }
+  }
+  return SQLITE_OK;
+}
+
+/**
+ * Writes the quantized form of vector, a float32 vector of the column i
+ * indexed by rescore(), to the slot chunk_offset of chunk chunk_id in the
+ * column's _rescore_chunksNN table.
+ */
+static int rescore_write_quantized(vec0_vtab *p, int i, i64 chunk_id,
+                                   i64 chunk_offset, const void *vector) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  size_t qsize = rescore_quantized_byte_size(col);
+  void *qbuf = sqlite3_malloc(qsize);
+  if (!qbuf) {
+    return SQLITE_NOMEM;
+  }
+  switch (col->rescore.quantizer_type) {
+  case VEC0_RESCORE_QUANTIZER_BIT:
+    rescore_quantize_float_to_bit((const float *)vector, (uint8_t *)qbuf,
+                                  col->dimensions);
+    break;
+  case VEC0_RESCORE_QUANTIZER_INT8:
+    rescore_quantize_float_to_int8((const float *)vector, (int8_t *)qbuf,
+                                   col->dimensions);
+    break;
+  }
+
+  sqlite3_blob *blob = NULL;
+  int rc =
+      sqlite3_blob_open(p->db, p->schemaName, p->shadowRescoreChunksNames[i],
+                        "vectors", chunk_id, 1, &blob);
+  if (rc != SQLITE_OK) {
+    sqlite3_free(qbuf);
+    return vec0_error_rc(rc);
+  }
+  rc = sqlite3_blob_write(blob, qbuf, qsize, chunk_offset * qsize);
+  sqlite3_free(qbuf);
+  int brc = sqlite3_blob_close(blob);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  return brc;
+}
+
+/**
+ * Writes the vectors of a new row to the columns indexed by rescore(): each
+ * quantized to the row's slot in _rescore_chunksNN, and as is to a new row of
+ * _rescore_vectorsNN.
+ */
+static int rescore_on_insert(vec0_vtab *p, i64 chunk_rowid, i64 chunk_offset,
+                             i64 rowid, void *vectorDatas[]) {
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE) {
+      continue;
+    }
+    int rc = rescore_write_quantized(p, i, chunk_rowid, chunk_offset,
+                                     vectorDatas[i]);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+
+    char *zSql = sqlite3_mprintf(
+        "INSERT INTO \"%w\".\"%w\"(rowid, vector) VALUES (?, ?)", p->schemaName,
+        p->shadowRescoreVectorsNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      sqlite3_finalize(stmt);
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    sqlite3_bind_blob(stmt, 2, vectorDatas[i],
+                      vector_column_byte_size(p->vector_columns[i]),
+                      SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+      return vec0_error_rc(rc);
+    }
+  }
+  return SQLITE_OK;
+}
+
+/**
+ * Zeroes a deleted row's quantized vectors in _rescore_chunksNN, and deletes
+ * its row of _rescore_vectorsNN, for each column indexed by rescore().
+ */
+static int rescore_on_delete(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
+                             i64 rowid) {
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE) {
+      continue;
+    }
+    size_t qsize = rescore_quantized_byte_size(&p->vector_columns[i]);
+    void *zeroBuf = sqlite3_malloc(qsize);
+    if (!zeroBuf) {
+      return SQLITE_NOMEM;
+    }
+    memset(zeroBuf, 0, qsize);
+
+    sqlite3_blob *blob = NULL;
+    int rc =
+        sqlite3_blob_open(p->db, p->schemaName, p->shadowRescoreChunksNames[i],
+                          "vectors", chunk_id, 1, &blob);
+    if (rc != SQLITE_OK) {
+      sqlite3_free(zeroBuf);
+      return vec0_error_rc(rc);
+    }
+    rc = sqlite3_blob_write(blob, zeroBuf, qsize, chunk_offset * qsize);
+    sqlite3_free(zeroBuf);
+    int brc = sqlite3_blob_close(blob);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    if (brc != SQLITE_OK) {
+      return brc;
+    }
+
+    char *zSql =
+        sqlite3_mprintf("DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                        p->schemaName, p->shadowRescoreVectorsNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+      return vec0_error_rc(rc);
+    }
+  }
+  return SQLITE_OK;
+}
+
+/**
+ * Deletes chunk chunk_id from the _rescore_chunksNN table of each column
+ * indexed by rescore(). rescore_on_delete() already deleted the chunk's rows of
+ * _rescore_vectorsNN.
+ */
+static int rescore_delete_chunk(vec0_vtab *p, i64 chunk_id) {
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE) {
+      continue;
+    }
+    char *zSql = sqlite3_mprintf("DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                                 p->schemaName, p->shadowRescoreChunksNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, chunk_id);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+      return vec0_error_rc(rc);
+    }
+  }
+  return SQLITE_OK;
+}
+
+/**
+ * The KNN of a column indexed by rescore(). It scans the quantized vectors of
+ * the chunks stmtChunks returns for the k * oversample rows nearest the
+ * quantized query vector, ranks those candidates by the distance of their
+ * float32 vectors to the query vector, and returns the k nearest that meet the
+ * query's distance constraints. Takes and returns what
+ * vec0Filter_knn_chunks_iter() does.
+ *
+ * Distance constraints apply to the float32 distances of the candidates, as in
+ * https://github.com/asg017/sqlite-vec/pull/309
+ */
+static int rescore_knn(vec0_vtab *p, sqlite3_stmt *stmtChunks,
+                       struct VectorColumnDefinition *vector_column,
+                       int vectorColumnIdx, struct Array *arrayRowidsIn,
+                       const char *idxStr, int argc, sqlite3_value **argv,
+                       void *queryVector, i64 k, i64 **out_topk_rowids,
+                       f32 **out_topk_distances, i64 *out_used) {
+  int rc = SQLITE_OK;
+  int oversample = vector_column->rescore.oversample_search > 0
+                       ? vector_column->rescore.oversample_search
+                       : vector_column->rescore.oversample;
+  i64 k_oversample = k * oversample;
+  if (k_oversample > 4096) {
+    k_oversample = 4096;
+  }
+
+  size_t qdim = vector_column->dimensions;
+  size_t qsize = rescore_quantized_byte_size(vector_column);
+  size_t fsize = vector_column_byte_size(*vector_column);
+
+  sqlite3_blob *blobQ = NULL;
+  sqlite3_blob *blobFloat = NULL;
+  i64 *cand_rowids = NULL;
+  f32 *cand_distances = NULL;
+  i64 *tmp_rowids = NULL;
+  f32 *tmp_distances = NULL;
+  f32 *chunk_distances = NULL;
+  i32 *chunk_topk_idxs = NULL;
+  u8 *b = NULL;
+  u8 *bmRowids = NULL;
+  void *baseVectors = NULL;
+  f32 *float_distances = NULL;
+  void *fBuf = NULL;
+  i64 *out_rowids = NULL;
+  f32 *out_distances = NULL;
+
+  void *quantizedQuery = sqlite3_malloc(qsize);
+  if (!quantizedQuery) {
+    return SQLITE_NOMEM;
+  }
+  switch (vector_column->rescore.quantizer_type) {
+  case VEC0_RESCORE_QUANTIZER_BIT:
+    rescore_quantize_float_to_bit((const float *)queryVector,
+                                  (uint8_t *)quantizedQuery, qdim);
+    break;
+  case VEC0_RESCORE_QUANTIZER_INT8:
+    rescore_quantize_float_to_int8((const float *)queryVector,
+                                   (int8_t *)quantizedQuery, qdim);
+    break;
+  }
+
+  // Phase 1: scan the quantized chunks for the k * oversample nearest rows
+  cand_rowids = sqlite3_malloc(k_oversample * sizeof(i64));
+  cand_distances = sqlite3_malloc(k_oversample * sizeof(f32));
+  tmp_rowids = sqlite3_malloc(k_oversample * sizeof(i64));
+  tmp_distances = sqlite3_malloc(k_oversample * sizeof(f32));
+  chunk_distances = sqlite3_malloc(p->chunk_size * sizeof(f32));
+  chunk_topk_idxs = sqlite3_malloc(k_oversample * sizeof(i32));
+  b = bitmap_new(p->chunk_size);
+  baseVectors = sqlite3_malloc((i64)p->chunk_size * (i64)qsize);
+  if (!cand_rowids || !cand_distances || !tmp_rowids || !tmp_distances ||
+      !chunk_distances || !chunk_topk_idxs || !b || !baseVectors) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  memset(cand_rowids, 0, k_oversample * sizeof(i64));
+  memset(cand_distances, 0, k_oversample * sizeof(f32));
+
+  if (arrayRowidsIn) {
+    bmRowids = bitmap_new(p->chunk_size);
+    if (!bmRowids) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+  }
+
+  i64 cand_used = 0;
+  while (1) {
+    rc = sqlite3_step(stmtChunks);
+    if (rc == SQLITE_DONE) {
+      break;
+    }
+    if (rc != SQLITE_ROW) {
+      vtab_set_error(&p->base, "chunks iter error");
+      rc = vec0_error_rc(rc);
+      goto cleanup;
+    }
+
+    i64 chunk_id = sqlite3_column_int64(stmtChunks, 0);
+    unsigned char *chunkValidity =
+        (unsigned char *)sqlite3_column_blob(stmtChunks, 1);
+    i64 validitySize = sqlite3_column_bytes(stmtChunks, 1);
+    if (validitySize != p->chunk_size / CHAR_BIT) {
+      vtab_set_error(
+          &p->base,
+          "chunk validity size doesn't match - expected %lld, found %lld",
+          p->chunk_size / CHAR_BIT, validitySize);
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
+    i64 *chunkRowids = (i64 *)sqlite3_column_blob(stmtChunks, 2);
+    i64 rowidsSize = sqlite3_column_bytes(stmtChunks, 2);
+    if (rowidsSize != (i64)(p->chunk_size * sizeof(i64))) {
+      vtab_set_error(&p->base,
+                     "chunk rowids size doesn't match - expected %lld, found "
+                     "%lld",
+                     p->chunk_size * sizeof(i64), rowidsSize);
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
+
+    memset(chunk_distances, 0, p->chunk_size * sizeof(f32));
+    memset(chunk_topk_idxs, 0, k_oversample * sizeof(i32));
+    bitmap_copy(b, chunkValidity, p->chunk_size);
+
+    if (arrayRowidsIn) {
+      bitmap_clear(bmRowids, p->chunk_size);
+      for (int j = 0; j < p->chunk_size; j++) {
+        if (!bitmap_get(chunkValidity, j)) {
+          continue;
+        }
+        i64 rid = chunkRowids[j];
+        void *found = bsearch(&rid, arrayRowidsIn->z, arrayRowidsIn->length,
+                              sizeof(i64), _cmp);
+        bitmap_set(bmRowids, j, found ? 1 : 0);
+      }
+      bitmap_and_inplace(b, bmRowids, p->chunk_size);
+    }
+
+    // A chunk whose rowid filter keeps no row offers no candidate, so its
+    // vectors are never read.
+    if (!bitmap_any(b, p->chunk_size)) {
+      continue;
+    }
+
+    rc = sqlite3_blob_open(p->db, p->schemaName,
+                           p->shadowRescoreChunksNames[vectorColumnIdx],
+                           "vectors", chunk_id, 0, &blobQ);
+    if (rc != SQLITE_OK) {
+      vtab_set_error(&p->base,
+                     "could not open rescore vectors blob for chunk %lld",
+                     chunk_id);
+      rc = vec0_error_rc(rc);
+      goto cleanup;
+    }
+    i64 currentBaseVectorsSize = sqlite3_blob_bytes(blobQ);
+    i64 expectedBaseVectorsSize = (i64)p->chunk_size * (i64)qsize;
+    if (currentBaseVectorsSize != expectedBaseVectorsSize) {
+      vtab_set_error(
+          &p->base,
+          "rescore vectors blob size doesn't match - expected %lld, found %lld",
+          expectedBaseVectorsSize, currentBaseVectorsSize);
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
+    rc = sqlite3_blob_read(blobQ, baseVectors, currentBaseVectorsSize, 0);
+    // blobQ is opened read-only, so closing it never fails
+    sqlite3_blob_close(blobQ);
+    blobQ = NULL;
+    if (rc != SQLITE_OK) {
+      vtab_set_error(&p->base, "rescore vectors blob read error for %lld",
+                     chunk_id);
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
+
+    for (int j = 0; j < p->chunk_size; j++) {
+      if (!bitmap_get(b, j)) {
+        continue;
+      }
+      f32 dist = FLT_MAX;
+      switch (vector_column->rescore.quantizer_type) {
+      case VEC0_RESCORE_QUANTIZER_BIT: {
+        const u8 *base_j = ((u8 *)baseVectors) + (j * (qdim / CHAR_BIT));
+        dist = distance_hamming(base_j, (u8 *)quantizedQuery, &qdim);
+        break;
+      }
+      case VEC0_RESCORE_QUANTIZER_INT8: {
+        const i8 *base_j = ((i8 *)baseVectors) + (j * qdim);
+        switch (vector_column->distance_metric) {
+        case VEC0_DISTANCE_METRIC_L2:
+          dist = distance_l2_sqr_int8(base_j, (i8 *)quantizedQuery, &qdim);
+          break;
+        case VEC0_DISTANCE_METRIC_COSINE:
+          dist = distance_cosine_int8(base_j, (i8 *)quantizedQuery, &qdim);
+          break;
+        case VEC0_DISTANCE_METRIC_L1:
+          dist = (f32)distance_l1_int8(base_j, (i8 *)quantizedQuery, &qdim);
+          break;
+        }
+        break;
+      }
+      }
+      chunk_distances[j] = dist;
+    }
+
+    int used1;
+    min_idx(chunk_distances, p->chunk_size, b, chunk_topk_idxs,
+            min(k_oversample, p->chunk_size), &used1);
+
+    i64 merged_used;
+    merge_sorted_lists(cand_distances, cand_rowids, cand_used, chunk_distances,
+                       chunkRowids, chunk_topk_idxs,
+                       min(min(k_oversample, p->chunk_size), used1),
+                       tmp_distances, tmp_rowids, k_oversample, &merged_used);
+
+    for (i64 j = 0; j < merged_used; j++) {
+      cand_rowids[j] = tmp_rowids[j];
+      cand_distances[j] = tmp_distances[j];
+    }
+    cand_used = merged_used;
+  }
+  rc = SQLITE_OK;
+
+  // Phase 2: rank the candidates by the distances of their float32 vectors,
+  // which blob_reopen() reads from _rescore_vectorsNN by rowid directly
+  if (cand_used > 0) {
+    float_distances = sqlite3_malloc(cand_used * sizeof(f32));
+    fBuf = sqlite3_malloc(fsize);
+    if (!float_distances || !fBuf) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    for (i64 j = 0; j < cand_used; j++) {
+      if (j == 0) {
+        rc = sqlite3_blob_open(p->db, p->schemaName,
+                               p->shadowRescoreVectorsNames[vectorColumnIdx],
+                               "vector", cand_rowids[0], 0, &blobFloat);
+      } else {
+        rc = sqlite3_blob_reopen(blobFloat, cand_rowids[j]);
+      }
+      if (rc != SQLITE_OK) {
+        vtab_set_error(&p->base,
+                       "could not read the rescore vector of row %lld",
+                       cand_rowids[j]);
+        rc = vec0_error_rc(rc);
+        goto cleanup;
+      }
+      rc = sqlite3_blob_read(blobFloat, fBuf, fsize, 0);
+      if (rc != SQLITE_OK) {
+        vtab_set_error(&p->base,
+                       "could not read the rescore vector of row %lld",
+                       cand_rowids[j]);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+      }
+      float_distances[j] =
+          vec0_compute_distance(vector_column, fBuf, queryVector);
+    }
+
+    vec0_knn_keep_within_distance(idxStr, argc, argv, cand_rowids,
+                                  float_distances, &cand_used);
+
+    // sort by float32 distance
+    for (i64 a = 0; a + 1 < cand_used; a++) {
+      i64 minIdx = a;
+      for (i64 c = a + 1; c < cand_used; c++) {
+        if (float_distances[c] < float_distances[minIdx]) {
+          minIdx = c;
+        }
+      }
+      if (minIdx != a) {
+        f32 td = float_distances[a];
+        float_distances[a] = float_distances[minIdx];
+        float_distances[minIdx] = td;
+        i64 tr = cand_rowids[a];
+        cand_rowids[a] = cand_rowids[minIdx];
+        cand_rowids[minIdx] = tr;
+      }
+    }
+  }
+
+  i64 result_k = min(k, cand_used);
+  if (result_k > 0) {
+    out_rowids = sqlite3_malloc(result_k * sizeof(i64));
+    out_distances = sqlite3_malloc(result_k * sizeof(f32));
+    if (!out_rowids || !out_distances) {
+      sqlite3_free(out_rowids);
+      sqlite3_free(out_distances);
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    for (i64 j = 0; j < result_k; j++) {
+      out_rowids[j] = cand_rowids[j];
+      out_distances[j] = float_distances[j];
+    }
+  }
+  *out_topk_rowids = out_rowids;
+  *out_topk_distances = out_distances;
+  *out_used = result_k;
+
+cleanup:
+  // both blobs are opened read-only, so closing them never fails
+  sqlite3_blob_close(blobQ);
+  sqlite3_blob_close(blobFloat);
+  sqlite3_free(quantizedQuery);
+  sqlite3_free(cand_rowids);
+  sqlite3_free(cand_distances);
+  sqlite3_free(tmp_rowids);
+  sqlite3_free(tmp_distances);
+  sqlite3_free(chunk_distances);
+  sqlite3_free(chunk_topk_idxs);
+  sqlite3_free(b);
+  sqlite3_free(bmRowids);
+  sqlite3_free(baseVectors);
+  sqlite3_free(float_distances);
+  sqlite3_free(fBuf);
+  return rc;
+}
+
+/**
+ * The command `oversample=N` sets the oversample of every column indexed by
+ * rescore() for the KNN queries of this connection, in place of the one its
+ * CREATE gave. Returns SQLITE_EMPTY for any other command.
+ */
+static int rescore_handle_command(vec0_vtab *p, const char *command) {
+  static const char zKey[] = "oversample=";
+  if (strncmp(command, zKey, sizeof(zKey) - 1) != 0) {
+    return SQLITE_EMPTY;
+  }
+  const char *zValue = command + sizeof(zKey) - 1;
+  char *zEnd;
+  errno = 0;
+  long oversample = strtol(zValue, &zEnd, 10);
+  if (!(*zValue >= '0' && *zValue <= '9') || *zEnd != '\0' || errno == ERANGE ||
+      oversample < 1 || oversample > INT_MAX) {
+    vtab_set_error(&p->base, "oversample must be >= 1");
+    return SQLITE_ERROR;
+  }
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_RESCORE) {
+      p->vector_columns[i].rescore.oversample_search = (int)oversample;
+    }
+  }
+  return SQLITE_OK;
+}
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+// A vector column indexed by diskann() keeps three shadow tables: _vectorsNN
+// holds each vector by rowid, _diskann_nodesNN holds a row for each node of
+// the graph, and _diskann_bufferNN holds the vectors waiting to join the graph
+// when buffer_threshold is set. A node's row holds a validity bitmap of its
+// n_neighbors slots, the rowid of the neighbor in each slot, and each
+// neighbor's vector quantized by the column's neighbor_quantizer, so a search
+// ranks a node's neighbors without reading their vectors. Every search starts
+// at the medoid, the `diskann_medoid_NN` row of _info.
+// https://github.com/asg017/sqlite-vec/blob/04d28bd/sqlite-vec-diskann.c
+
+int diskann_validity_byte_size(int n_neighbors) {
+  return n_neighbors / CHAR_BIT;
+}
+
+size_t diskann_neighbor_ids_byte_size(int n_neighbors) {
+  return (size_t)n_neighbors * sizeof(i64);
+}
+
+size_t
+diskann_quantized_vector_byte_size(enum Vec0DiskannQuantizerType quantizer_type,
+                                   size_t dimensions) {
+  switch (quantizer_type) {
+  case VEC0_DISKANN_QUANTIZER_BINARY:
+    return dimensions / CHAR_BIT;
+  case VEC0_DISKANN_QUANTIZER_INT8:
+    return dimensions;
+  }
+  return 0;
+}
+
+size_t
+diskann_neighbor_qvecs_byte_size(int n_neighbors,
+                                 enum Vec0DiskannQuantizerType quantizer_type,
+                                 size_t dimensions) {
+  return (size_t)n_neighbors *
+         diskann_quantized_vector_byte_size(quantizer_type, dimensions);
+}
+
+/**
+ * Allocates the three blobs of a node with no neighbor, each to be freed with
+ * sqlite3_free().
+ */
+int diskann_node_init(int n_neighbors,
+                      enum Vec0DiskannQuantizerType quantizer_type,
+                      size_t dimensions, u8 **outValidity, int *outValiditySize,
+                      u8 **outNeighborIds, int *outNeighborIdsSize,
+                      u8 **outNeighborQvecs, int *outNeighborQvecsSize) {
+  int validitySize = diskann_validity_byte_size(n_neighbors);
+  int idsSize = (int)diskann_neighbor_ids_byte_size(n_neighbors);
+  int qvecsSize = (int)diskann_neighbor_qvecs_byte_size(
+      n_neighbors, quantizer_type, dimensions);
+  u8 *validity = sqlite3_malloc(validitySize);
+  u8 *ids = sqlite3_malloc(idsSize);
+  u8 *qvecs = sqlite3_malloc(qvecsSize);
+  if (!validity || !ids || !qvecs) {
+    sqlite3_free(validity);
+    sqlite3_free(ids);
+    sqlite3_free(qvecs);
+    return SQLITE_NOMEM;
+  }
+  memset(validity, 0, validitySize);
+  memset(ids, 0, idsSize);
+  memset(qvecs, 0, qvecsSize);
+  *outValidity = validity;
+  *outValiditySize = validitySize;
+  *outNeighborIds = ids;
+  *outNeighborIdsSize = idsSize;
+  *outNeighborQvecs = qvecs;
+  *outNeighborQvecsSize = qvecsSize;
+  return SQLITE_OK;
+}
+
+int diskann_validity_get(const u8 *validity, int i) {
+  return (validity[i / CHAR_BIT] >> (i % CHAR_BIT)) & 1;
+}
+
+void diskann_validity_set(u8 *validity, int i, int value) {
+  if (value) {
+    validity[i / CHAR_BIT] |= (1 << (i % CHAR_BIT));
+  } else {
+    validity[i / CHAR_BIT] &= ~(1 << (i % CHAR_BIT));
+  }
+}
+
+int diskann_validity_count(const u8 *validity, int n_neighbors) {
+  int count = 0;
+  for (int i = 0; i < n_neighbors; i++) {
+    count += diskann_validity_get(validity, i);
+  }
+  return count;
+}
+
+i64 diskann_neighbor_id_get(const u8 *neighbor_ids, int i) {
+  i64 rowid;
+  memcpy(&rowid, neighbor_ids + i * sizeof(i64), sizeof(i64));
+  return rowid;
+}
+
+void diskann_neighbor_id_set(u8 *neighbor_ids, int i, i64 rowid) {
+  memcpy(neighbor_ids + i * sizeof(i64), &rowid, sizeof(i64));
+}
+
+const u8 *
+diskann_neighbor_qvec_get(const u8 *qvecs, int i,
+                          enum Vec0DiskannQuantizerType quantizer_type,
+                          size_t dimensions) {
+  return qvecs + (size_t)i * diskann_quantized_vector_byte_size(quantizer_type,
+                                                                dimensions);
+}
+
+void diskann_neighbor_qvec_set(u8 *qvecs, int i, const u8 *src_qvec,
+                               enum Vec0DiskannQuantizerType quantizer_type,
+                               size_t dimensions) {
+  size_t size = diskann_quantized_vector_byte_size(quantizer_type, dimensions);
+  memcpy(qvecs + (size_t)i * size, src_qvec, size);
+}
+
+void diskann_node_set_neighbor(u8 *validity, u8 *neighbor_ids, u8 *qvecs, int i,
+                               i64 neighbor_rowid, const u8 *neighbor_qvec,
+                               enum Vec0DiskannQuantizerType quantizer_type,
+                               size_t dimensions) {
+  diskann_validity_set(validity, i, 1);
+  diskann_neighbor_id_set(neighbor_ids, i, neighbor_rowid);
+  diskann_neighbor_qvec_set(qvecs, i, neighbor_qvec, quantizer_type,
+                            dimensions);
+}
+
+void diskann_node_clear_neighbor(u8 *validity, u8 *neighbor_ids, u8 *qvecs,
+                                 int i,
+                                 enum Vec0DiskannQuantizerType quantizer_type,
+                                 size_t dimensions) {
+  size_t size = diskann_quantized_vector_byte_size(quantizer_type, dimensions);
+  diskann_validity_set(validity, i, 0);
+  diskann_neighbor_id_set(neighbor_ids, i, 0);
+  memset(qvecs + (size_t)i * size, 0, size);
+}
+
+/**
+ * Writes the quantized form of a float32 vector to out, which holds
+ * diskann_quantized_vector_byte_size() bytes: under binary a bit per
+ * dimension, set when the value is > 0; under int8 [-1, 1] mapped onto
+ * [-128, 127] in steps of 2/255, truncating toward zero, with values outside
+ * it clamped and NaN as 127, as rescore's int8 quantizer does.
+ */
+int diskann_quantize_vector(const f32 *src, size_t dimensions,
+                            enum Vec0DiskannQuantizerType quantizer_type,
+                            u8 *out) {
+  switch (quantizer_type) {
+  case VEC0_DISKANN_QUANTIZER_BINARY:
+    memset(out, 0, dimensions / CHAR_BIT);
+    for (size_t i = 0; i < dimensions; i++) {
+      if (src[i] > 0.0f) {
+        out[i / CHAR_BIT] |= (1 << (i % CHAR_BIT));
+      }
+    }
+    return SQLITE_OK;
+  case VEC0_DISKANN_QUANTIZER_INT8: {
+    f32 step = 2.0f / 255.0f;
+    for (size_t i = 0; i < dimensions; i++) {
+      f32 v = (src[i] - (-1.0f)) / step - 128.0f;
+      if (!(v <= 127.0f))
+        v = 127.0f;
+      if (!(v >= -128.0f))
+        v = -128.0f;
+      ((i8 *)out)[i] = (i8)v;
+    }
+    return SQLITE_OK;
+  }
+  }
+  return SQLITE_ERROR;
+}
+
+/**
+ * Writes the quantized form of a vector of column col's element type to out:
+ * a float32 vector as diskann_quantize_vector() writes it, and an int8 vector
+ * as itself under the int8 quantizer and under binary as a bit per dimension,
+ * set when the value is > 0.
+ */
+static void diskann_quantize(struct VectorColumnDefinition *col,
+                             const void *src, u8 *out) {
+  if (col->element_type == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
+    diskann_quantize_vector((const f32 *)src, col->dimensions,
+                            col->diskann.quantizer_type, out);
+    return;
+  }
+  const i8 *v = (const i8 *)src;
+  if (col->diskann.quantizer_type == VEC0_DISKANN_QUANTIZER_INT8) {
+    memcpy(out, v, col->dimensions);
+    return;
+  }
+  memset(out, 0, col->dimensions / CHAR_BIT);
+  for (size_t i = 0; i < col->dimensions; i++) {
+    if (v[i] > 0) {
+      out[i / CHAR_BIT] |= (1 << (i % CHAR_BIT));
+    }
+  }
+}
+
+/**
+ * The distance between two vectors quantized for column col, by which a
+ * search ranks the neighbors it has not visited: hamming under binary, and
+ * the column's metric between the int8 vectors under int8.
+ */
+static f32 diskann_distance_quantized(struct VectorColumnDefinition *col,
+                                      const u8 *a, const u8 *b) {
+  size_t dimensions = col->dimensions;
+  switch (col->diskann.quantizer_type) {
+  case VEC0_DISKANN_QUANTIZER_BINARY:
+    return distance_hamming(a, b, &dimensions);
+  case VEC0_DISKANN_QUANTIZER_INT8:
+    switch (col->distance_metric) {
+    case VEC0_DISTANCE_METRIC_L2:
+      return distance_l2_sqr_int8(a, b, &dimensions);
+    case VEC0_DISTANCE_METRIC_COSINE:
+      return distance_cosine_int8(a, b, &dimensions);
+    case VEC0_DISTANCE_METRIC_L1:
+      return (f32)distance_l1_int8(a, b, &dimensions);
+    }
+  }
+  return FLT_MAX;
+}
+
+/**
+ * Reads the medoid of column i, the node every search starts at, into
+ * *outMedoid, or sets *outIsEmpty when the graph has no node.
+ */
+static int diskann_medoid_get(vec0_vtab *p, int i, i64 *outMedoid,
+                              int *outIsEmpty) {
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf("SELECT value FROM " VEC0_SHADOW_INFO_NAME
+                               " WHERE key = ?",
+                               p->schemaName, p->tableName);
+  char *zKey = sqlite3_mprintf("diskann_medoid_%02d", i);
+  if (!zSql || !zKey) {
+    sqlite3_free(zSql);
+    sqlite3_free(zKey);
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    sqlite3_free(zKey);
+    return rc;
+  }
+  sqlite3_bind_text(stmt, 1, zKey, -1, sqlite3_free);
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_ROW) {
+    *outIsEmpty = sqlite3_column_type(stmt, 0) == SQLITE_NULL;
+    *outMedoid = sqlite3_column_int64(stmt, 0);
+    rc = SQLITE_OK;
+  } else if (rc == SQLITE_DONE) {
+    vtab_set_error(&p->base,
+                   "the _info table has no DiskANN medoid for vector column %d",
+                   i);
+    rc = SQLITE_ERROR;
+  } else {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_finalize(stmt);
+  return rc;
+}
+
+/**
+ * Sets the medoid of column i, or marks the graph empty when isEmpty is set.
+ */
+static int diskann_medoid_set(vec0_vtab *p, int i, i64 medoid, int isEmpty) {
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf("UPDATE " VEC0_SHADOW_INFO_NAME
+                               " SET value = ? WHERE key = ?",
+                               p->schemaName, p->tableName);
+  char *zKey = sqlite3_mprintf("diskann_medoid_%02d", i);
+  if (!zSql || !zKey) {
+    sqlite3_free(zSql);
+    sqlite3_free(zKey);
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    sqlite3_free(zKey);
+    return rc;
+  }
+  if (isEmpty) {
+    sqlite3_bind_null(stmt, 1);
+  } else {
+    sqlite3_bind_int64(stmt, 1, medoid);
+  }
+  sqlite3_bind_text(stmt, 2, zKey, -1, sqlite3_free);
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Reads node rowid of column i: its validity bitmap, its neighbors' rowids
+ * and their quantized vectors, each to be freed with sqlite3_free(). Returns
+ * SQLITE_EMPTY when the graph has no such node, and SQLITE_ERROR when a blob
+ * is not the size the column's options give it.
+ */
+static int diskann_node_read(vec0_vtab *p, int i, i64 rowid, u8 **outValidity,
+                             int *outValiditySize, u8 **outNeighborIds,
+                             int *outNeighborIdsSize, u8 **outQvecs,
+                             int *outQvecsSize) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  int rc = vec0_cached_stmt(p, &p->stmtDiskannNodeRead[i],
+                            "SELECT neighbors_validity, neighbor_ids, "
+                            "neighbor_quantized_vectors FROM \"%w\".\"%w\" "
+                            "WHERE rowid = ?",
+                            p->shadowDiskannNodesNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->stmtDiskannNodeRead[i];
+  sqlite3_bind_int64(stmt, 1, rowid);
+  rc = sqlite3_step(stmt);
+  if (rc != SQLITE_ROW) {
+    rc = rc == SQLITE_DONE ? SQLITE_EMPTY : vec0_error_rc(rc);
+    goto done;
+  }
+
+  const void *blobs[3];
+  int sizes[3];
+  int expected[3] = {
+      diskann_validity_byte_size(cfg->n_neighbors),
+      (int)diskann_neighbor_ids_byte_size(cfg->n_neighbors),
+      (int)diskann_neighbor_qvecs_byte_size(
+          cfg->n_neighbors, cfg->quantizer_type, col->dimensions),
+  };
+  for (int j = 0; j < 3; j++) {
+    blobs[j] = sqlite3_column_blob(stmt, j);
+    sizes[j] = sqlite3_column_bytes(stmt, j);
+    if (!blobs[j] || sizes[j] != expected[j]) {
+      vtab_set_error(&p->base,
+                     "node %lld of the DiskANN graph of vector column %d is "
+                     "corrupt",
+                     rowid, i);
+      rc = SQLITE_ERROR;
+      goto done;
+    }
+  }
+  u8 *copies[3];
+  for (int j = 0; j < 3; j++) {
+    copies[j] = sqlite3_malloc(sizes[j]);
+    if (!copies[j]) {
+      for (int c = 0; c < j; c++) {
+        sqlite3_free(copies[c]);
+      }
+      rc = SQLITE_NOMEM;
+      goto done;
+    }
+    memcpy(copies[j], blobs[j], sizes[j]);
+  }
+  *outValidity = copies[0];
+  *outValiditySize = sizes[0];
+  *outNeighborIds = copies[1];
+  *outNeighborIdsSize = sizes[1];
+  *outQvecs = copies[2];
+  *outQvecsSize = sizes[2];
+  rc = SQLITE_OK;
+
+done:
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc;
+}
+
+/**
+ * Writes node rowid of column i, replacing the row it had.
+ */
+static int diskann_node_write(vec0_vtab *p, int i, i64 rowid,
+                              const u8 *validity, int validitySize,
+                              const u8 *neighborIds, int neighborIdsSize,
+                              const u8 *qvecs, int qvecsSize) {
+  int rc = vec0_cached_stmt(p, &p->stmtDiskannNodeWrite[i],
+                            "INSERT OR REPLACE INTO \"%w\".\"%w\" (rowid, "
+                            "neighbors_validity, neighbor_ids, "
+                            "neighbor_quantized_vectors) VALUES (?, ?, ?, ?)",
+                            p->shadowDiskannNodesNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->stmtDiskannNodeWrite[i];
+  sqlite3_bind_int64(stmt, 1, rowid);
+  sqlite3_bind_blob(stmt, 2, validity, validitySize, SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 3, neighborIds, neighborIdsSize, SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 4, qvecs, qvecsSize, SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Reads the vector of row rowid in column i into a buffer to be freed with
+ * sqlite3_free(), and its size into *outVectorSize unless that is NULL.
+ * Returns SQLITE_EMPTY when the column has no vector with that rowid.
+ */
+static int diskann_vector_read(vec0_vtab *p, int i, i64 rowid, void **outVector,
+                               int *outVectorSize) {
+  int rc = vec0_cached_stmt(p, &p->stmtDiskannVectorRead[i],
+                            "SELECT vector FROM \"%w\".\"%w\" WHERE rowid = ?",
+                            p->shadowDiskannVectorsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->stmtDiskannVectorRead[i];
+  sqlite3_bind_int64(stmt, 1, rowid);
+  rc = sqlite3_step(stmt);
+  if (rc != SQLITE_ROW) {
+    rc = rc == SQLITE_DONE ? SQLITE_EMPTY : vec0_error_rc(rc);
+    goto done;
+  }
+  const void *blob = sqlite3_column_blob(stmt, 0);
+  int size = sqlite3_column_bytes(stmt, 0);
+  if (!blob || size != (int)vector_column_byte_size(p->vector_columns[i])) {
+    vtab_set_error(&p->base,
+                   "the DiskANN vector of row %lld in vector column %d is "
+                   "corrupt",
+                   rowid, i);
+    rc = SQLITE_ERROR;
+    goto done;
+  }
+  void *vector = sqlite3_malloc(size);
+  if (!vector) {
+    rc = SQLITE_NOMEM;
+    goto done;
+  }
+  memcpy(vector, blob, size);
+  *outVector = vector;
+  if (outVectorSize) {
+    *outVectorSize = size;
+  }
+  rc = SQLITE_OK;
+
+done:
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc;
+}
+
+/**
+ * Writes the vector of row rowid in column i, replacing the row it had.
+ */
+static int diskann_vector_write(vec0_vtab *p, int i, i64 rowid,
+                                const void *vector) {
+  int rc =
+      vec0_cached_stmt(p, &p->stmtDiskannVectorWrite[i],
+                       "INSERT OR REPLACE INTO \"%w\".\"%w\" (rowid, vector) "
+                       "VALUES (?, ?)",
+                       p->shadowDiskannVectorsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->stmtDiskannVectorWrite[i];
+  sqlite3_bind_int64(stmt, 1, rowid);
+  sqlite3_bind_blob(stmt, 2, vector,
+                    (int)vector_column_byte_size(p->vector_columns[i]),
+                    SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+struct Vec0DiskannCandidate {
+  i64 rowid;
+  f32 distance;
+  // set once the search has read the candidate's node
+  int visited;
+  // set once its exact distance replaced its quantized one
+  int confirmed;
+};
+
+/**
+ * The candidates of a search, nearest first, at most capacity of them.
+ */
+struct DiskannCandidateList {
+  struct Vec0DiskannCandidate *items;
+  int count;
+  int capacity;
+};
+
+int diskann_candidate_list_init(struct DiskannCandidateList *list,
+                                int capacity) {
+  list->items = sqlite3_malloc64((sqlite3_uint64)capacity *
+                                 sizeof(struct Vec0DiskannCandidate));
+  if (!list->items) {
+    return SQLITE_NOMEM;
+  }
+  list->count = 0;
+  list->capacity = capacity;
+  return SQLITE_OK;
+}
+
+void diskann_candidate_list_free(struct DiskannCandidateList *list) {
+  sqlite3_free(list->items);
+  list->items = NULL;
+  list->count = 0;
+  list->capacity = 0;
+}
+
+/**
+ * Moves the candidate at index i to its place by distance, and returns that
+ * place.
+ */
+static int diskann_candidate_list_sift(struct DiskannCandidateList *list,
+                                       int i) {
+  struct Vec0DiskannCandidate item = list->items[i];
+  while (i > 0 && list->items[i - 1].distance > item.distance) {
+    list->items[i] = list->items[i - 1];
+    i--;
+  }
+  while (i + 1 < list->count && list->items[i + 1].distance < item.distance) {
+    list->items[i] = list->items[i + 1];
+    i++;
+  }
+  list->items[i] = item;
+  return i;
+}
+
+/**
+ * Adds candidate rowid at distance, unvisited. A rowid the list holds keeps
+ * its place unless distance is nearer, and a list at capacity drops its
+ * farthest candidate for a nearer one and ignores a farther one. Returns 1
+ * when the list holds the rowid afterward.
+ */
+int diskann_candidate_list_insert(struct DiskannCandidateList *list, i64 rowid,
+                                  f32 distance) {
+  for (int i = 0; i < list->count; i++) {
+    if (list->items[i].rowid == rowid) {
+      if (distance < list->items[i].distance) {
+        list->items[i].distance = distance;
+        diskann_candidate_list_sift(list, i);
+      }
+      return 1;
+    }
+  }
+  if (list->count >= list->capacity) {
+    if (list->count == 0 || distance >= list->items[list->count - 1].distance) {
+      return 0;
+    }
+    list->count--;
+  }
+  int lo = 0, hi = list->count;
+  while (lo < hi) {
+    int mid = (lo + hi) / 2;
+    if (list->items[mid].distance < distance) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  memmove(&list->items[lo + 1], &list->items[lo],
+          (list->count - lo) * sizeof(struct Vec0DiskannCandidate));
+  list->items[lo].rowid = rowid;
+  list->items[lo].distance = distance;
+  list->items[lo].visited = 0;
+  list->items[lo].confirmed = 0;
+  list->count++;
+  return 1;
+}
+
+/**
+ * Gives the candidate at index i its exact distance, nearer or farther than
+ * the quantized one it was ranked by, and returns its new index.
+ */
+int diskann_candidate_list_rerank(struct DiskannCandidateList *list, int i,
+                                  f32 distance) {
+  list->items[i].distance = distance;
+  return diskann_candidate_list_sift(list, i);
+}
+
+/**
+ * Returns the index of the nearest candidate not yet visited, or -1.
+ */
+int diskann_candidate_list_next_unvisited(
+    const struct DiskannCandidateList *list) {
+  for (int i = 0; i < list->count; i++) {
+    if (!list->items[i].visited) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The rowids a search has visited: a hash set by open addressing that doubles
+ * once half full, with rowid 0, its empty slot, held apart.
+ */
+struct DiskannVisitedSet {
+  i64 *slots;
+  int capacity;
+  int count;
+  int hasZero;
+};
+
+int diskann_visited_set_init(struct DiskannVisitedSet *set, int capacity) {
+  int cap = 16;
+  while (cap < capacity && cap < (1 << 30)) {
+    cap *= 2;
+  }
+  set->slots = sqlite3_malloc64((sqlite3_uint64)cap * sizeof(i64));
+  if (!set->slots) {
+    return SQLITE_NOMEM;
+  }
+  memset(set->slots, 0, (size_t)cap * sizeof(i64));
+  set->capacity = cap;
+  set->count = 0;
+  set->hasZero = 0;
+  return SQLITE_OK;
+}
+
+void diskann_visited_set_free(struct DiskannVisitedSet *set) {
+  sqlite3_free(set->slots);
+  set->slots = NULL;
+  set->capacity = 0;
+  set->count = 0;
+  set->hasZero = 0;
+}
+
+static int diskann_visited_set_slot(i64 rowid, int capacity) {
+  return (int)(((u64)rowid * 0x9E3779B97F4A7C15ULL) >> 32) & (capacity - 1);
+}
+
+int diskann_visited_set_contains(const struct DiskannVisitedSet *set,
+                                 i64 rowid) {
+  if (rowid == 0) {
+    return set->hasZero;
+  }
+  int mask = set->capacity - 1;
+  for (int slot = diskann_visited_set_slot(rowid, set->capacity);;
+       slot = (slot + 1) & mask) {
+    if (set->slots[slot] == 0) {
+      return 0;
+    }
+    if (set->slots[slot] == rowid) {
+      return 1;
+    }
+  }
+}
+
+/**
+ * Adds rowid. Sets *outAdded to 1 when the set did not hold it.
+ */
+int diskann_visited_set_insert(struct DiskannVisitedSet *set, i64 rowid,
+                               int *outAdded) {
+  *outAdded = 0;
+  if (rowid == 0) {
+    *outAdded = !set->hasZero;
+    set->hasZero = 1;
+    return SQLITE_OK;
+  }
+  if ((set->count + 1) * 2 > set->capacity) {
+    struct DiskannVisitedSet grown;
+    int rc = diskann_visited_set_init(&grown, set->capacity * 2);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    for (int i = 0; i < set->capacity; i++) {
+      if (set->slots[i] != 0) {
+        int added;
+        diskann_visited_set_insert(&grown, set->slots[i], &added);
+      }
+    }
+    grown.hasZero = set->hasZero;
+    sqlite3_free(set->slots);
+    *set = grown;
+  }
+  int mask = set->capacity - 1;
+  for (int slot = diskann_visited_set_slot(rowid, set->capacity);;
+       slot = (slot + 1) & mask) {
+    if (set->slots[slot] == rowid) {
+      return SQLITE_OK;
+    }
+    if (set->slots[slot] == 0) {
+      set->slots[slot] = rowid;
+      set->count++;
+      *outAdded = 1;
+      return SQLITE_OK;
+    }
+  }
+}
+
+/**
+ * Finds the rows of column i nearest queryVector, a vector of the column's
+ * element type, by LM-Search in the LM-DiskANN paper: a greedy walk of the
+ * graph from the medoid that keeps the nearest searchListSize candidates (at
+ * least k), visits the nearest not yet visited until it has visited them all,
+ * and ranks a candidate by its quantized distance until it is visited and by
+ * its exact distance after. A candidate whose vector is gone, a deleted row
+ * an edge still names, is left out. Writes up to k of the nearest, nearest
+ * first, to outRowids and outDistances, and their number to *outCount.
+ */
+static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
+                          int searchListSize, i64 *outRowids, f32 *outDistances,
+                          int *outCount) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  struct DiskannCandidateList candidates = {0};
+  struct DiskannVisitedSet visited = {0};
+  u8 *queryQuantized = NULL;
+  void *medoidVector = NULL;
+  int rc;
+
+  *outCount = 0;
+  if (searchListSize < k) {
+    searchListSize = k;
+  }
+  i64 medoid;
+  int isEmpty;
+  rc = diskann_medoid_get(p, i, &medoid, &isEmpty);
+  if (rc != SQLITE_OK || isEmpty) {
+    return rc;
+  }
+
+  // the medoid starts the walk ranked by its exact distance
+  rc = diskann_vector_read(p, i, medoid, &medoidVector, NULL);
+  if (rc != SQLITE_OK) {
+    if (rc == SQLITE_EMPTY) {
+      vtab_set_error(&p->base,
+                     "the DiskANN medoid %lld of vector column %d has no "
+                     "vector",
+                     medoid, i);
+      rc = SQLITE_ERROR;
+    }
+    return rc;
+  }
+  f32 medoidDistance = vec0_compute_distance(col, medoidVector, queryVector);
+  sqlite3_free(medoidVector);
+
+  queryQuantized = sqlite3_malloc((int)diskann_quantized_vector_byte_size(
+      cfg->quantizer_type, col->dimensions));
+  if (!queryQuantized) {
+    return SQLITE_NOMEM;
+  }
+  diskann_quantize(col, queryVector, queryQuantized);
+  rc = diskann_candidate_list_init(&candidates, searchListSize);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  rc = diskann_visited_set_init(&visited, searchListSize);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  diskann_candidate_list_insert(&candidates, medoid, medoidDistance);
+  candidates.items[0].confirmed = 1;
+
+  for (int next;
+       (next = diskann_candidate_list_next_unvisited(&candidates)) >= 0;) {
+    candidates.items[next].visited = 1;
+    i64 rowid = candidates.items[next].rowid;
+    int added;
+    rc = diskann_visited_set_insert(&visited, rowid, &added);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+
+    // paper line 13: rank the visited candidate by its exact distance
+    if (!candidates.items[next].confirmed) {
+      void *vector = NULL;
+      rc = diskann_vector_read(p, i, rowid, &vector, NULL);
+      if (rc == SQLITE_OK) {
+        f32 distance = vec0_compute_distance(col, vector, queryVector);
+        sqlite3_free(vector);
+        next = diskann_candidate_list_rerank(&candidates, next, distance);
+        candidates.items[next].confirmed = 1;
+      } else if (rc != SQLITE_EMPTY) {
+        goto cleanup;
+      }
+    }
+
+    u8 *validity = NULL, *neighborIds = NULL, *qvecs = NULL;
+    int validitySize, neighborIdsSize, qvecsSize;
+    rc = diskann_node_read(p, i, rowid, &validity, &validitySize, &neighborIds,
+                           &neighborIdsSize, &qvecs, &qvecsSize);
+    if (rc == SQLITE_EMPTY) {
+      continue;
+    }
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    for (int j = 0; j < cfg->n_neighbors; j++) {
+      if (!diskann_validity_get(validity, j)) {
+        continue;
+      }
+      i64 neighbor = diskann_neighbor_id_get(neighborIds, j);
+      if (diskann_visited_set_contains(&visited, neighbor)) {
+        continue;
+      }
+      f32 distance = diskann_distance_quantized(
+          col, queryQuantized,
+          diskann_neighbor_qvec_get(qvecs, j, cfg->quantizer_type,
+                                    col->dimensions));
+      diskann_candidate_list_insert(&candidates, neighbor, distance);
+    }
+    sqlite3_free(validity);
+    sqlite3_free(neighborIds);
+    sqlite3_free(qvecs);
+  }
+
+  for (int j = 0; j < candidates.count && *outCount < k; j++) {
+    if (candidates.items[j].confirmed) {
+      outRowids[*outCount] = candidates.items[j].rowid;
+      outDistances[*outCount] = candidates.items[j].distance;
+      (*outCount)++;
+    }
+  }
+  rc = SQLITE_OK;
+
+cleanup:
+  sqlite3_free(queryQuantized);
+  diskann_candidate_list_free(&candidates);
+  diskann_visited_set_free(&visited);
+  return rc;
+}
+
+/**
+ * RobustPrune's selection, Algorithm 4 in the LM-DiskANN paper: of
+ * num_candidates candidates in order of p_distances, their distances to the
+ * node, keeps the nearest left, drops every candidate it covers, one whose
+ * distance to it times alpha is at most the candidate's distance to the node,
+ * and repeats until max_neighbors are kept or none is left. distance(ctx, a,
+ * b) is the distance between candidates a and b. Sets outSelected[i] to 1 for
+ * each kept candidate and 0 for the others, and *outCount to the number kept.
+ */
+int diskann_prune_select(const f32 *p_distances, int num_candidates, f32 alpha,
+                         int max_neighbors,
+                         f32 (*distance)(void *ctx, int a, int b), void *ctx,
+                         int *outSelected, int *outCount) {
+  *outCount = 0;
+  if (num_candidates == 0) {
+    return SQLITE_OK;
+  }
+  u8 *active = sqlite3_malloc(num_candidates);
+  if (!active) {
+    return SQLITE_NOMEM;
+  }
+  memset(active, 1, num_candidates);
+  memset(outSelected, 0, num_candidates * sizeof(int));
+  for (int best = 0; best < num_candidates && *outCount < max_neighbors;
+       best++) {
+    if (!active[best]) {
+      continue;
+    }
+    outSelected[best] = 1;
+    (*outCount)++;
+    active[best] = 0;
+    for (int j = best + 1; j < num_candidates; j++) {
+      if (active[j] && alpha * distance(ctx, best, j) <= p_distances[j]) {
+        active[j] = 0;
+      }
+    }
+  }
+  sqlite3_free(active);
+  return SQLITE_OK;
+}
+
+struct DiskannPruneVectors {
+  struct VectorColumnDefinition *col;
+  void **vectors;
+};
+
+static f32 diskann_prune_distance(void *ctx, int a, int b) {
+  struct DiskannPruneVectors *v = ctx;
+  return vec0_compute_distance(v->col, v->vectors[a], v->vectors[b]);
+}
+
+/**
+ * Chooses the neighbors of node p_rowid of column i from candidates, rows of
+ * the column at candidate_distances from it, by RobustPrune with the column's
+ * alpha, up to its n_neighbors, and writes their rowids, nearest first, to
+ * outNeighborRowids. Reorders candidates and candidate_distances.
+ */
+static int diskann_robust_prune(vec0_vtab *p, int i, i64 p_rowid,
+                                i64 *candidates, f32 *candidate_distances,
+                                int num_candidates, i64 *outNeighborRowids,
+                                int *outNeighborCount) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  int rc = SQLITE_OK;
+  *outNeighborCount = 0;
+
+  for (int j = 0; j < num_candidates; j++) {
+    if (candidates[j] == p_rowid) {
+      candidates[j] = candidates[num_candidates - 1];
+      candidate_distances[j] = candidate_distances[num_candidates - 1];
+      num_candidates--;
+      break;
+    }
+  }
+  if (num_candidates == 0) {
+    return SQLITE_OK;
+  }
+  for (int j = 1; j < num_candidates; j++) {
+    f32 d = candidate_distances[j];
+    i64 r = candidates[j];
+    int m = j - 1;
+    while (m >= 0 && candidate_distances[m] > d) {
+      candidate_distances[m + 1] = candidate_distances[m];
+      candidates[m + 1] = candidates[m];
+      m--;
+    }
+    candidate_distances[m + 1] = d;
+    candidates[m + 1] = r;
+  }
+
+  void **vectors = sqlite3_malloc(num_candidates * sizeof(void *));
+  int *selected = sqlite3_malloc(num_candidates * sizeof(int));
+  if (!vectors || !selected) {
+    sqlite3_free(vectors);
+    sqlite3_free(selected);
+    return SQLITE_NOMEM;
+  }
+  memset(vectors, 0, num_candidates * sizeof(void *));
+  // a candidate whose vector is gone is no candidate
+  int kept = 0;
+  for (int j = 0; j < num_candidates; j++) {
+    rc = diskann_vector_read(p, i, candidates[j], &vectors[kept], NULL);
+    if (rc == SQLITE_EMPTY) {
+      continue;
+    }
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    candidates[kept] = candidates[j];
+    candidate_distances[kept] = candidate_distances[j];
+    kept++;
+  }
+  struct DiskannPruneVectors ctx = {col, vectors};
+  int count;
+  rc = diskann_prune_select(candidate_distances, kept, col->diskann.alpha,
+                            col->diskann.n_neighbors, diskann_prune_distance,
+                            &ctx, selected, &count);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  for (int j = 0; j < kept; j++) {
+    if (selected[j]) {
+      outNeighborRowids[(*outNeighborCount)++] = candidates[j];
+    }
+  }
+
+cleanup:
+  for (int j = 0; j < num_candidates; j++) {
+    sqlite3_free(vectors[j]);
+  }
+  sqlite3_free(vectors);
+  sqlite3_free(selected);
+  return rc;
+}
+
+/**
+ * Writes node nodeRowid of column i with the neighbors neighborRowids, each
+ * with its vector quantized.
+ */
+static int diskann_write_pruned_neighbors(vec0_vtab *p, int i, i64 nodeRowid,
+                                          const i64 *neighborRowids,
+                                          int neighborCount) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  u8 *validity, *neighborIds, *qvecs;
+  int validitySize, neighborIdsSize, qvecsSize;
+  int rc = diskann_node_init(
+      cfg->n_neighbors, cfg->quantizer_type, col->dimensions, &validity,
+      &validitySize, &neighborIds, &neighborIdsSize, &qvecs, &qvecsSize);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  u8 *qvec = sqlite3_malloc((int)diskann_quantized_vector_byte_size(
+      cfg->quantizer_type, col->dimensions));
+  if (!qvec) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  for (int j = 0; j < neighborCount && j < cfg->n_neighbors; j++) {
+    void *vector = NULL;
+    rc = diskann_vector_read(p, i, neighborRowids[j], &vector, NULL);
+    if (rc == SQLITE_EMPTY) {
+      continue;
+    }
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    diskann_quantize(col, vector, qvec);
+    sqlite3_free(vector);
+    diskann_node_set_neighbor(validity, neighborIds, qvecs, j,
+                              neighborRowids[j], qvec, cfg->quantizer_type,
+                              col->dimensions);
+  }
+  rc = diskann_node_write(p, i, nodeRowid, validity, validitySize, neighborIds,
+                          neighborIdsSize, qvecs, qvecsSize);
+
+cleanup:
+  sqlite3_free(qvec);
+  sqlite3_free(validity);
+  sqlite3_free(neighborIds);
+  sqlite3_free(qvecs);
+  return rc;
+}
+
+/**
+ * Makes target_rowid, whose vector is target_vector, a neighbor of node
+ * node_rowid of column i. A node with every slot taken keeps the nearer of
+ * the target and its farthest neighbor by quantized distance, which reads no
+ * neighbor's vector.
+ */
+static int diskann_add_reverse_edge(vec0_vtab *p, int i, i64 node_rowid,
+                                    i64 target_rowid,
+                                    const void *target_vector) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  u8 *validity = NULL, *neighborIds = NULL, *qvecs = NULL;
+  int validitySize, neighborIdsSize, qvecsSize;
+  u8 *targetQ = NULL, *nodeQ = NULL;
+  void *nodeVector = NULL;
+  int rc =
+      diskann_node_read(p, i, node_rowid, &validity, &validitySize,
+                        &neighborIds, &neighborIdsSize, &qvecs, &qvecsSize);
+  if (rc == SQLITE_EMPTY) {
+    vtab_set_error(&p->base,
+                   "node %lld of the DiskANN graph of vector column %d is "
+                   "missing",
+                   node_rowid, i);
+    return SQLITE_ERROR;
+  }
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  for (int j = 0; j < cfg->n_neighbors; j++) {
+    if (diskann_validity_get(validity, j) &&
+        diskann_neighbor_id_get(neighborIds, j) == target_rowid) {
+      goto cleanup;
+    }
+  }
+
+  size_t qsize =
+      diskann_quantized_vector_byte_size(cfg->quantizer_type, col->dimensions);
+  targetQ = sqlite3_malloc((int)qsize);
+  nodeQ = sqlite3_malloc((int)qsize);
+  if (!targetQ || !nodeQ) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  diskann_quantize(col, target_vector, targetQ);
+
+  int slot = -1;
+  for (int j = 0; j < cfg->n_neighbors; j++) {
+    if (!diskann_validity_get(validity, j)) {
+      slot = j;
+      break;
+    }
+  }
+  if (slot < 0) {
+    rc = diskann_vector_read(p, i, node_rowid, &nodeVector, NULL);
+    if (rc != SQLITE_OK) {
+      if (rc == SQLITE_EMPTY) {
+        vtab_set_error(&p->base,
+                       "node %lld of the DiskANN graph of vector column %d "
+                       "has no vector",
+                       node_rowid, i);
+        rc = SQLITE_ERROR;
+      }
+      goto cleanup;
+    }
+    diskann_quantize(col, nodeVector, nodeQ);
+    f32 targetDistance = diskann_distance_quantized(col, nodeQ, targetQ);
+    f32 worstDistance = -1.0f;
+    for (int j = 0; j < cfg->n_neighbors; j++) {
+      f32 d = diskann_distance_quantized(
+          col, nodeQ,
+          diskann_neighbor_qvec_get(qvecs, j, cfg->quantizer_type,
+                                    col->dimensions));
+      if (d > worstDistance) {
+        worstDistance = d;
+        slot = j;
+      }
+    }
+    if (!(targetDistance < worstDistance)) {
+      goto cleanup;
+    }
+  }
+  diskann_node_set_neighbor(validity, neighborIds, qvecs, slot, target_rowid,
+                            targetQ, cfg->quantizer_type, col->dimensions);
+  rc = diskann_node_write(p, i, node_rowid, validity, validitySize, neighborIds,
+                          neighborIdsSize, qvecs, qvecsSize);
+
+cleanup:
+  sqlite3_free(targetQ);
+  sqlite3_free(nodeQ);
+  sqlite3_free(nodeVector);
+  sqlite3_free(validity);
+  sqlite3_free(neighborIds);
+  sqlite3_free(qvecs);
+  return rc;
+}
+
+/**
+ * Links row rowid of column i, whose vector is in _vectorsNN, into the graph
+ * by LM-Insert, Algorithm 2 in the LM-DiskANN paper: searches the graph for
+ * its nearest rows, chooses its neighbors among them by RobustPrune, and adds
+ * it to theirs. The first row of an empty graph becomes its medoid.
+ */
+static int diskann_insert_graph(vec0_vtab *p, int i, i64 rowid,
+                                const void *vector) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  i64 medoid;
+  int isEmpty;
+  int rc = diskann_medoid_get(p, i, &medoid, &isEmpty);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  if (isEmpty) {
+    rc = diskann_write_pruned_neighbors(p, i, rowid, NULL, 0);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    return diskann_medoid_set(p, i, rowid, 0);
+  }
+
+  int L = cfg->search_list_size_insert > 0 ? cfg->search_list_size_insert
+                                           : cfg->search_list_size;
+  i64 *searchRowids = sqlite3_malloc64((sqlite3_uint64)L * sizeof(i64));
+  f32 *searchDistances = sqlite3_malloc64((sqlite3_uint64)L * sizeof(f32));
+  i64 *neighbors = sqlite3_malloc(cfg->n_neighbors * sizeof(i64));
+  if (!searchRowids || !searchDistances || !neighbors) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  int searchCount;
+  rc = diskann_search(p, i, vector, L, L, searchRowids, searchDistances,
+                      &searchCount);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  int neighborCount;
+  rc = diskann_robust_prune(p, i, rowid, searchRowids, searchDistances,
+                            searchCount, neighbors, &neighborCount);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  rc = diskann_write_pruned_neighbors(p, i, rowid, neighbors, neighborCount);
+  for (int j = 0; rc == SQLITE_OK && j < neighborCount; j++) {
+    rc = diskann_add_reverse_edge(p, i, neighbors[j], rowid, vector);
+  }
+
+cleanup:
+  sqlite3_free(searchRowids);
+  sqlite3_free(searchDistances);
+  sqlite3_free(neighbors);
+  return rc;
+}
+
+/**
+ * Links the vectors waiting in _diskann_bufferNN of column i into the graph,
+ * in rowid order, and empties the buffer.
+ */
+static int diskann_flush_buffer(vec0_vtab *p, int i) {
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf("SELECT rowid, vector FROM \"%w\".\"%w\" "
+                               "ORDER BY rowid",
+                               p->schemaName, p->shadowDiskannBufferNames[i]);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  size_t size = vector_column_byte_size(p->vector_columns[i]);
+  int stepRc = SQLITE_DONE;
+  while (rc == SQLITE_OK && (stepRc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    const void *vector = sqlite3_column_blob(stmt, 1);
+    if (!vector || sqlite3_column_bytes(stmt, 1) != (int)size) {
+      vtab_set_error(&p->base,
+                     "the DiskANN buffer of vector column %d is corrupt", i);
+      rc = SQLITE_ERROR;
+    } else {
+      rc = diskann_insert_graph(p, i, sqlite3_column_int64(stmt, 0), vector);
+    }
+  }
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  if (stepRc != SQLITE_DONE) {
+    return vec0_error_rc(stepRc);
+  }
+
+  zSql = sqlite3_mprintf("DELETE FROM \"%w\".\"%w\"", p->schemaName,
+                         p->shadowDiskannBufferNames[i]);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Adds row rowid with vector to column i: writes the vector to _vectorsNN,
+ * then links it into the graph, or with buffer_threshold set writes it to
+ * _diskann_bufferNN and links the buffer once it holds buffer_threshold
+ * vectors.
+ */
+static int diskann_insert(vec0_vtab *p, int i, i64 rowid, const void *vector) {
+  struct Vec0DiskannConfig *cfg = &p->vector_columns[i].diskann;
+  int rc = diskann_vector_write(p, i, rowid, vector);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  if (cfg->buffer_threshold == 0) {
+    return diskann_insert_graph(p, i, rowid, vector);
+  }
+
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf("INSERT INTO \"%w\".\"%w\" (rowid, vector) "
+                               "VALUES (?, ?)",
+                               p->schemaName, p->shadowDiskannBufferNames[i]);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_bind_int64(stmt, 1, rowid);
+  sqlite3_bind_blob(stmt, 2, vector,
+                    (int)vector_column_byte_size(p->vector_columns[i]),
+                    SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) {
+    return vec0_error_rc(rc);
+  }
+
+  zSql = sqlite3_mprintf("SELECT count(*) FROM \"%w\".\"%w\"", p->schemaName,
+                         p->shadowDiskannBufferNames[i]);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = sqlite3_step(stmt);
+  if (rc != SQLITE_ROW) {
+    sqlite3_finalize(stmt);
+    return vec0_error_rc(rc);
+  }
+  i64 buffered = sqlite3_column_int64(stmt, 0);
+  sqlite3_finalize(stmt);
+  return buffered >= cfg->buffer_threshold ? diskann_flush_buffer(p, i)
+                                           : SQLITE_OK;
+}
+
+/**
+ * Repairs the graph of column i after node deleted_rowid goes, as LM-Delete,
+ * Algorithm 3 in the LM-DiskANN paper, does for each of its neighbors: drops
+ * the deleted node from the neighbor's slots and gives the freed slot the
+ * first of the deleted node's other neighbors the neighbor lacks.
+ */
+static int diskann_repair_reverse_edges(vec0_vtab *p, int i, i64 deleted_rowid,
+                                        const i64 *deleted_neighbors,
+                                        int deleted_neighbor_count) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  u8 *qvec = sqlite3_malloc((int)diskann_quantized_vector_byte_size(
+      cfg->quantizer_type, col->dimensions));
+  if (!qvec) {
+    return SQLITE_NOMEM;
+  }
+  int rc = SQLITE_OK;
+  for (int dn = 0; rc == SQLITE_OK && dn < deleted_neighbor_count; dn++) {
+    i64 node = deleted_neighbors[dn];
+    u8 *validity = NULL, *neighborIds = NULL, *qvecs = NULL;
+    int vs, nis, qs;
+    rc = diskann_node_read(p, i, node, &validity, &vs, &neighborIds, &nis,
+                           &qvecs, &qs);
+    if (rc == SQLITE_EMPTY) {
+      rc = SQLITE_OK;
+      continue;
+    }
+    if (rc != SQLITE_OK) {
+      break;
+    }
+    int cleared = -1;
+    for (int j = 0; j < cfg->n_neighbors; j++) {
+      if (diskann_validity_get(validity, j) &&
+          diskann_neighbor_id_get(neighborIds, j) == deleted_rowid) {
+        diskann_node_clear_neighbor(validity, neighborIds, qvecs, j,
+                                    cfg->quantizer_type, col->dimensions);
+        cleared = j;
+        break;
+      }
+    }
+    if (cleared >= 0) {
+      for (int di = 0; di < deleted_neighbor_count; di++) {
+        i64 candidate = deleted_neighbors[di];
+        if (candidate == node || candidate == deleted_rowid) {
+          continue;
+        }
+        int already = 0;
+        for (int j = 0; j < cfg->n_neighbors; j++) {
+          if (diskann_validity_get(validity, j) &&
+              diskann_neighbor_id_get(neighborIds, j) == candidate) {
+            already = 1;
+            break;
+          }
+        }
+        if (already) {
+          continue;
+        }
+        void *vector = NULL;
+        rc = diskann_vector_read(p, i, candidate, &vector, NULL);
+        if (rc == SQLITE_EMPTY) {
+          rc = SQLITE_OK;
+          continue;
+        }
+        if (rc != SQLITE_OK) {
+          break;
+        }
+        diskann_quantize(col, vector, qvec);
+        sqlite3_free(vector);
+        diskann_node_set_neighbor(validity, neighborIds, qvecs, cleared,
+                                  candidate, qvec, cfg->quantizer_type,
+                                  col->dimensions);
+        break;
+      }
+      if (rc == SQLITE_OK) {
+        rc = diskann_node_write(p, i, node, validity, vs, neighborIds, nis,
+                                qvecs, qs);
+      }
+    }
+    sqlite3_free(validity);
+    sqlite3_free(neighborIds);
+    sqlite3_free(qvecs);
+  }
+  sqlite3_free(qvec);
+  return rc;
+}
+
+/**
+ * Clears every slot of the graph of column i that still names deleted_rowid,
+ * so no node keeps its rowid or quantized vector.
+ */
+static int diskann_scrub_deleted_rowid(vec0_vtab *p, int i, i64 deleted_rowid) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  int validityBytes = diskann_validity_byte_size(cfg->n_neighbors);
+  int idsBytes = (int)diskann_neighbor_ids_byte_size(cfg->n_neighbors);
+  sqlite3_stmt *stmt = NULL;
+  struct Array dirty;
+  int rc = array_init(&dirty, sizeof(i64), 16);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  char *zSql = sqlite3_mprintf("SELECT rowid, neighbors_validity, "
+                               "neighbor_ids FROM \"%w\".\"%w\"",
+                               p->schemaName, p->shadowDiskannNodesNames[i]);
+  if (!zSql) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    const u8 *validity = sqlite3_column_blob(stmt, 1);
+    int vs = sqlite3_column_bytes(stmt, 1);
+    const u8 *ids = sqlite3_column_blob(stmt, 2);
+    int is = sqlite3_column_bytes(stmt, 2);
+    i64 node = sqlite3_column_int64(stmt, 0);
+    if (!validity || !ids || vs != validityBytes || is != idsBytes) {
+      vtab_set_error(&p->base,
+                     "node %lld of the DiskANN graph of vector column %d is "
+                     "corrupt",
+                     node, i);
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
+    for (int j = 0; j < cfg->n_neighbors; j++) {
+      if (diskann_validity_get(validity, j) &&
+          diskann_neighbor_id_get(ids, j) == deleted_rowid) {
+        rc = array_append(&dirty, &node);
+        if (rc != SQLITE_OK) {
+          goto cleanup;
+        }
+        break;
+      }
+    }
+  }
+  if (rc != SQLITE_DONE) {
+    rc = vec0_error_rc(rc);
+    goto cleanup;
+  }
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  rc = SQLITE_OK;
+  for (size_t d = 0; rc == SQLITE_OK && d < dirty.length; d++) {
+    i64 node = ((i64 *)dirty.z)[d];
+    u8 *validity = NULL, *neighborIds = NULL, *qvecs = NULL;
+    int vs, nis, qs;
+    rc = diskann_node_read(p, i, node, &validity, &vs, &neighborIds, &nis,
+                           &qvecs, &qs);
+    if (rc == SQLITE_EMPTY) {
+      rc = SQLITE_OK;
+      continue;
+    }
+    if (rc != SQLITE_OK) {
+      break;
+    }
+    for (int j = 0; j < cfg->n_neighbors; j++) {
+      if (diskann_validity_get(validity, j) &&
+          diskann_neighbor_id_get(neighborIds, j) == deleted_rowid) {
+        diskann_node_clear_neighbor(validity, neighborIds, qvecs, j,
+                                    cfg->quantizer_type, col->dimensions);
+      }
+    }
+    rc = diskann_node_write(p, i, node, validity, vs, neighborIds, nis, qvecs,
+                            qs);
+    sqlite3_free(validity);
+    sqlite3_free(neighborIds);
+    sqlite3_free(qvecs);
+  }
+
+cleanup:
+  sqlite3_finalize(stmt);
+  array_cleanup(&dirty);
+  return rc;
+}
+
+/**
+ * Removes row rowid from column i: from the buffer when it waits there, and
+ * otherwise from the graph, whose neighbors of it are repaired, with a new
+ * medoid when it was the medoid, any node of the graph left, and from
+ * _vectorsNN.
+ */
+static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  struct Vec0DiskannConfig *cfg = &col->diskann;
+  int rc;
+
+  if (cfg->buffer_threshold > 0) {
+    sqlite3_stmt *stmt = NULL;
+    char *zSql = sqlite3_mprintf("SELECT 1 FROM \"%w\".\"%w\" WHERE rowid = ?",
+                                 p->schemaName, p->shadowDiskannBufferNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_ROW) {
+      rc = vec0_exec_i64(p, "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                         p->shadowDiskannBufferNames[i], rowid);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
+      return vec0_exec_i64(p, "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                           p->shadowDiskannVectorsNames[i], rowid);
+    }
+    if (rc != SQLITE_DONE) {
+      return vec0_error_rc(rc);
+    }
+  }
+
+  u8 *validity = NULL, *neighborIds = NULL, *qvecs = NULL;
+  int vs, nis, qs;
+  rc = diskann_node_read(p, i, rowid, &validity, &vs, &neighborIds, &nis,
+                         &qvecs, &qs);
+  if (rc == SQLITE_EMPTY) {
+    return SQLITE_OK;
+  }
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  i64 *neighbors = sqlite3_malloc(cfg->n_neighbors * sizeof(i64));
+  int neighborCount = 0;
+  if (!neighbors) {
+    sqlite3_free(validity);
+    sqlite3_free(neighborIds);
+    sqlite3_free(qvecs);
+    return SQLITE_NOMEM;
+  }
+  for (int j = 0; j < cfg->n_neighbors; j++) {
+    if (diskann_validity_get(validity, j)) {
+      neighbors[neighborCount++] = diskann_neighbor_id_get(neighborIds, j);
+    }
+  }
+  sqlite3_free(validity);
+  sqlite3_free(neighborIds);
+  sqlite3_free(qvecs);
+
+  rc = diskann_repair_reverse_edges(p, i, rowid, neighbors, neighborCount);
+  sqlite3_free(neighbors);
+  if (rc == SQLITE_OK) {
+    rc = vec0_exec_i64(p, "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                       p->shadowDiskannNodesNames[i], rowid);
+  }
+  if (rc == SQLITE_OK) {
+    rc = vec0_exec_i64(p, "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                       p->shadowDiskannVectorsNames[i], rowid);
+  }
+
+  // a new medoid comes from the graph, which a vector waiting in the buffer
+  // has not joined
+  i64 medoid = 0;
+  int isEmpty = 1;
+  if (rc == SQLITE_OK) {
+    rc = diskann_medoid_get(p, i, &medoid, &isEmpty);
+  }
+  if (rc == SQLITE_OK && !isEmpty && medoid == rowid) {
+    sqlite3_stmt *stmt = NULL;
+    char *zSql = sqlite3_mprintf("SELECT rowid FROM \"%w\".\"%w\" LIMIT 1",
+                                 p->schemaName, p->shadowDiskannNodesNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+      i64 next = sqlite3_column_int64(stmt, 0);
+      sqlite3_finalize(stmt);
+      rc = diskann_medoid_set(p, i, next, 0);
+    } else {
+      sqlite3_finalize(stmt);
+      rc = rc == SQLITE_DONE ? diskann_medoid_set(p, i, 0, 1)
+                             : vec0_error_rc(rc);
+    }
+  }
+  if (rc == SQLITE_OK) {
+    rc = diskann_scrub_deleted_rowid(p, i, rowid);
+  }
+  return rc;
+}
+
+/**
+ * Returns 1 when every vector column of the table is indexed by diskann(),
+ * so the table keeps no chunks.
+ */
+static int vec0_all_columns_diskann(vec0_vtab *p) {
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
+      return 0;
+    }
+  }
+  return p->numVectorColumns > 0;
+}
+
+/**
+ * The KNN query of column vectorColumnIdx, indexed by diskann(). With rowid =
+ * or rowid IN, the candidates are the rows they name; otherwise they are the
+ * rows a graph search finds (diskann_search), the larger of the search list
+ * size and k of them, with every vector still in _diskann_bufferNN. Returns
+ * the k nearest candidates within the query's distance constraints, nearest
+ * first, as vec0Filter_knn_chunks_iter() does.
+ */
+static int diskann_knn(vec0_vtab *p,
+                       struct VectorColumnDefinition *vector_column,
+                       int vectorColumnIdx, struct Array *arrayRowidsIn,
+                       const char *idxStr, int argc, sqlite3_value **argv,
+                       void *queryVector, i64 k, i64 **out_topk_rowids,
+                       f32 **out_topk_distances, i64 *out_used) {
+  struct Vec0DiskannConfig *cfg = &vector_column->diskann;
+  sqlite3_stmt *stmt = NULL;
+  struct Array rowids, distances;
+  int rc = array_init(&rowids, sizeof(i64), 64);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = array_init(&distances, sizeof(f32), 64);
+  if (rc != SQLITE_OK) {
+    array_cleanup(&rowids);
+    return rc;
+  }
+
+  if (arrayRowidsIn) {
+    for (size_t j = 0; j < arrayRowidsIn->length; j++) {
+      i64 rowid = ((i64 *)arrayRowidsIn->z)[j];
+      if (j > 0 && rowid == ((i64 *)arrayRowidsIn->z)[j - 1]) {
+        continue;
+      }
+      void *vector = NULL;
+      rc = diskann_vector_read(p, vectorColumnIdx, rowid, &vector, NULL);
+      if (rc == SQLITE_EMPTY) {
+        continue;
+      }
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+      f32 distance = vec0_compute_distance(vector_column, vector, queryVector);
+      sqlite3_free(vector);
+      rc = array_append(&rowids, &rowid);
+      if (rc == SQLITE_OK) {
+        rc = array_append(&distances, &distance);
+      }
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+    }
+  } else {
+    int L = cfg->search_list_size_search > 0 ? cfg->search_list_size_search
+                                             : cfg->search_list_size;
+    int n = L > k ? L : (int)k;
+    i64 *found = sqlite3_malloc64((sqlite3_uint64)n * sizeof(i64));
+    f32 *foundDistances = sqlite3_malloc64((sqlite3_uint64)n * sizeof(f32));
+    int foundCount = 0;
+    if (!found || !foundDistances) {
+      rc = SQLITE_NOMEM;
+    } else {
+      rc = diskann_search(p, vectorColumnIdx, queryVector, n, L, found,
+                          foundDistances, &foundCount);
+    }
+    for (int j = 0; rc == SQLITE_OK && j < foundCount; j++) {
+      rc = array_append(&rowids, &found[j]);
+      if (rc == SQLITE_OK) {
+        rc = array_append(&distances, &foundDistances[j]);
+      }
+    }
+    sqlite3_free(found);
+    sqlite3_free(foundDistances);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+
+    char *zSql = sqlite3_mprintf("SELECT rowid, vector FROM \"%w\".\"%w\"",
+                                 p->schemaName,
+                                 p->shadowDiskannBufferNames[vectorColumnIdx]);
+    if (!zSql) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    size_t size = vector_column_byte_size(*vector_column);
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      i64 rowid = sqlite3_column_int64(stmt, 0);
+      const void *vector = sqlite3_column_blob(stmt, 1);
+      if (!vector || sqlite3_column_bytes(stmt, 1) != (int)size) {
+        vtab_set_error(&p->base,
+                       "the DiskANN buffer of vector column %d is corrupt",
+                       vectorColumnIdx);
+        rc = SQLITE_ERROR;
+        goto cleanup;
+      }
+      f32 distance = vec0_compute_distance(vector_column, vector, queryVector);
+      rc = array_append(&rowids, &rowid);
+      if (rc == SQLITE_OK) {
+        rc = array_append(&distances, &distance);
+      }
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+    }
+    if (rc != SQLITE_DONE) {
+      rc = vec0_error_rc(rc);
+      goto cleanup;
+    }
+    rc = SQLITE_OK;
+  }
+
+  i64 used = (i64)rowids.length;
+  vec0_knn_keep_within_distance(idxStr, argc, argv, (i64 *)rowids.z,
+                                (f32 *)distances.z, &used);
+  i64 *candRowids = (i64 *)rowids.z;
+  f32 *candDistances = (f32 *)distances.z;
+  i64 result_k = min(k, used);
+  // a selection of the result_k nearest, nearest first
+  for (i64 a = 0; a < result_k; a++) {
+    i64 m = a;
+    for (i64 c = a + 1; c < used; c++) {
+      if (candDistances[c] < candDistances[m]) {
+        m = c;
+      }
+    }
+    if (m != a) {
+      f32 td = candDistances[a];
+      candDistances[a] = candDistances[m];
+      candDistances[m] = td;
+      i64 tr = candRowids[a];
+      candRowids[a] = candRowids[m];
+      candRowids[m] = tr;
+    }
+  }
+  i64 *out_rowids = NULL;
+  f32 *out_distances = NULL;
+  if (result_k > 0) {
+    out_rowids = sqlite3_malloc64(result_k * sizeof(i64));
+    out_distances = sqlite3_malloc64(result_k * sizeof(f32));
+    if (!out_rowids || !out_distances) {
+      sqlite3_free(out_rowids);
+      sqlite3_free(out_distances);
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    memcpy(out_rowids, candRowids, result_k * sizeof(i64));
+    memcpy(out_distances, candDistances, result_k * sizeof(f32));
+  }
+  *out_topk_rowids = out_rowids;
+  *out_topk_distances = out_distances;
+  *out_used = result_k;
+  rc = SQLITE_OK;
+
+cleanup:
+  sqlite3_finalize(stmt);
+  array_cleanup(&rowids);
+  array_cleanup(&distances);
+  return rc;
+}
+
+/**
+ * The commands `search_list_size=N`, `search_list_size_search=N` and
+ * `search_list_size_insert=N` set those options of every column indexed by
+ * diskann() for this connection, in place of the ones its CREATE gave.
+ * Returns SQLITE_EMPTY for any other command.
+ */
+static int diskann_handle_command(vec0_vtab *p, const char *command) {
+  static const char *azKey[] = {"search_list_size=", "search_list_size_search=",
+                                "search_list_size_insert="};
+  int key = -1;
+  for (int j = 0; j < (int)countof(azKey); j++) {
+    if (strncmp(command, azKey[j], strlen(azKey[j])) == 0) {
+      key = j;
+    }
+  }
+  if (key < 0) {
+    return SQLITE_EMPTY;
+  }
+  const char *zValue = command + strlen(azKey[key]);
+  char *zEnd;
+  errno = 0;
+  long value = strtol(zValue, &zEnd, 10);
+  if (!(*zValue >= '0' && *zValue <= '9') || *zEnd != '\0' || errno == ERANGE ||
+      value < 1 || value > INT_MAX) {
+    vtab_set_error(&p->base, "%.*s must be >= 1", (int)strlen(azKey[key]) - 1,
+                   azKey[key]);
+    return SQLITE_ERROR;
+  }
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
+      continue;
+    }
+    struct Vec0DiskannConfig *cfg = &p->vector_columns[i].diskann;
+    int *target[] = {&cfg->search_list_size, &cfg->search_list_size_search,
+                     &cfg->search_list_size_insert};
+    *target[key] = (int)value;
+  }
+  return SQLITE_OK;
+}
+#else
+static int vec0_all_columns_diskann(vec0_vtab *p) {
+  UNUSED_PARAMETER(p);
+  return 0;
+}
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+// A vector column indexed by ivf() keeps its vectors in cells of up to 64
+// rows. Its k-means centroids are in _ivf_centroidsNN, held as the cells hold
+// vectors. _ivf_cellsNN has one row per cell: the centroid whose rows it
+// holds, or -1 for rows no clustering has placed, its count of rows, and in
+// slots a validity bit, the rowid and the vector of each row. _ivf_rowid_mapNN
+// gives each row's cell and slot. With a quantizer, the cells hold the vectors
+// quantized and _ivf_vectorsNN holds each float32 vector by rowid. The
+// ivf_trained_N row of _info is 1 once the column has centroids.
+// https://github.com/asg017/sqlite-vec/blob/04d28bd/sqlite-vec-ivf.c
+// https://github.com/asg017/sqlite-vec/blob/04d28bd/sqlite-vec-ivf-kmeans.c
+// with the fixes of https://github.com/asg017/sqlite-vec/pull/313
+
+/**
+ * The bytes of one vector in a cell of column col, and of one centroid.
+ */
+static int ivf_vector_size(struct VectorColumnDefinition *col) {
+  switch (col->ivf.quantizer) {
+  case VEC0_IVF_QUANTIZER_INT8:
+    return (int)col->dimensions;
+  case VEC0_IVF_QUANTIZER_BINARY:
+    return (int)(col->dimensions / CHAR_BIT);
+  case VEC0_IVF_QUANTIZER_NONE:
+    break;
+  }
+  return (int)(col->dimensions * sizeof(f32));
+}
+
+/**
+ * Writes the int8 form of a float32 vector: each value clamped to [-1, 1] and
+ * scaled to [-127, 127], truncating toward zero, with NaN as 127.
+ */
+void ivf_quantize_int8(const f32 *src, i8 *dst, size_t dimensions) {
+  for (size_t i = 0; i < dimensions; i++) {
+    f32 v = src[i];
+    if (!(v <= 1.0f)) {
+      v = 1.0f;
+    }
+    if (!(v >= -1.0f)) {
+      v = -1.0f;
+    }
+    dst[i] = (i8)(v * 127.0f);
+  }
+}
+
+/**
+ * Writes the binary form of a float32 vector: a bit per value, set when the
+ * value is > 0. dimensions is a multiple of 8.
+ */
+void ivf_quantize_binary(const f32 *src, u8 *dst, size_t dimensions) {
+  memset(dst, 0, dimensions / CHAR_BIT);
+  for (size_t i = 0; i < dimensions; i++) {
+    if (src[i] > 0.0f) {
+      dst[i / CHAR_BIT] |= (u8)(1 << (i % CHAR_BIT));
+    }
+  }
+}
+
+/**
+ * Writes the form of a float32 vector that the cells of column col hold.
+ */
+static void ivf_quantize(struct VectorColumnDefinition *col, const f32 *src,
+                         void *dst) {
+  switch (col->ivf.quantizer) {
+  case VEC0_IVF_QUANTIZER_INT8:
+    ivf_quantize_int8(src, (i8 *)dst, col->dimensions);
+    return;
+  case VEC0_IVF_QUANTIZER_BINARY:
+    ivf_quantize_binary(src, (u8 *)dst, col->dimensions);
+    return;
+  case VEC0_IVF_QUANTIZER_NONE:
+    break;
+  }
+  memcpy(dst, src, col->dimensions * sizeof(f32));
+}
+
+/**
+ * The distance between two vectors as the cells of column col hold them: in
+ * the column's metric for float32 and int8 vectors, and hamming for binary.
+ */
+static f32 ivf_distance(struct VectorColumnDefinition *col, const void *a,
+                        const void *b) {
+  size_t dimensions = col->dimensions;
+  switch (col->ivf.quantizer) {
+  case VEC0_IVF_QUANTIZER_INT8:
+    switch (col->distance_metric) {
+    case VEC0_DISTANCE_METRIC_L2:
+      return distance_l2_sqr_int8(a, b, &dimensions);
+    case VEC0_DISTANCE_METRIC_COSINE:
+      return distance_cosine_int8(a, b, &dimensions);
+    case VEC0_DISTANCE_METRIC_L1:
+      return (f32)distance_l1_int8(a, b, &dimensions);
+    }
+    break;
+  case VEC0_IVF_QUANTIZER_BINARY:
+    return distance_hamming(a, b, &dimensions);
+  case VEC0_IVF_QUANTIZER_NONE:
+    return vec0_compute_distance(col, a, b);
+  }
+  return FLT_MAX;
+}
+
+static u32 ivf_xorshift32(u32 *state) {
+  u32 x = *state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  *state = x;
+  return x;
+}
+
+static f32 ivf_l2_distance(const f32 *a, const f32 *b, size_t dimensions) {
+  f32 sum = 0.0f;
+  for (size_t d = 0; d < dimensions; d++) {
+    f32 diff = a[d] - b[d];
+    sum += diff * diff;
+  }
+  return sum;
+}
+
+/**
+ * The index of the nearest of the k centroids to vector by L2 distance.
+ */
+static int ivf_kmeans_nearest(const f32 *vector, const f32 *centroids,
+                              size_t dimensions, int k) {
+  f32 minDistance = FLT_MAX;
+  int best = 0;
+  for (int c = 0; c < k; c++) {
+    f32 distance =
+        ivf_l2_distance(vector, &centroids[(size_t)c * dimensions], dimensions);
+    if (distance < minDistance) {
+      minDistance = distance;
+      best = c;
+    }
+  }
+  return best;
+}
+
+/**
+ * k-means++: picks the first of k centroids from the n vectors at random, and
+ * each next one with probability in proportion to its squared distance from
+ * the nearest centroid picked.
+ */
+static int ivf_kmeans_init_plusplus(const f32 *vectors, int n,
+                                    size_t dimensions, int k, u32 seed,
+                                    f32 *centroids) {
+  if (seed == 0) {
+    seed = 42;
+  }
+  size_t size = dimensions * sizeof(f32);
+  int first = (int)(ivf_xorshift32(&seed) % (u32)n);
+  memcpy(centroids, &vectors[(size_t)first * dimensions], size);
+  if (k == 1) {
+    return SQLITE_OK;
+  }
+  f32 *distances = sqlite3_malloc64((sqlite3_uint64)n * sizeof(f32));
+  if (!distances) {
+    return SQLITE_NOMEM;
+  }
+  for (int c = 1; c < k; c++) {
+    // the distance of each vector from its nearest centroid so far
+    double total = 0.0;
+    for (int i = 0; i < n; i++) {
+      f32 distance =
+          ivf_l2_distance(&vectors[(size_t)i * dimensions],
+                          &centroids[(size_t)(c - 1) * dimensions], dimensions);
+      if (c == 1 || distance < distances[i]) {
+        distances[i] = distance;
+      }
+      total += distances[i];
+    }
+    int pick = n - 1;
+    if (total <= 0.0) {
+      pick = (int)(ivf_xorshift32(&seed) % (u32)n);
+    } else {
+      double threshold =
+          ((double)ivf_xorshift32(&seed) / (double)0xFFFFFFFF) * total;
+      double cumulative = 0.0;
+      for (int i = 0; i < n; i++) {
+        cumulative += distances[i];
+        if (cumulative >= threshold) {
+          pick = i;
+          break;
+        }
+      }
+    }
+    memcpy(&centroids[(size_t)c * dimensions],
+           &vectors[(size_t)pick * dimensions], size);
+  }
+  sqlite3_free(distances);
+  return SQLITE_OK;
+}
+
+/**
+ * Lloyd's k-means of the n vectors of dimensions floats each, from a k-means++
+ * start seeded with seed, for up to max_iter rounds or until no vector moves.
+ * A centroid that loses all its vectors moves to the vector farthest from its
+ * own centroid. Writes the k centroids to out_centroids, k <= n.
+ */
+int ivf_kmeans(const f32 *vectors, int n, size_t dimensions, int k,
+               int max_iter, u32 seed, f32 *out_centroids) {
+  if (n <= 0 || dimensions == 0 || k <= 0 || k > n) {
+    return SQLITE_MISUSE;
+  }
+  int *assignments = sqlite3_malloc64((sqlite3_uint64)n * sizeof(int));
+  f32 *sums = sqlite3_malloc64((sqlite3_uint64)k * dimensions * sizeof(f32));
+  int *counts = sqlite3_malloc64((sqlite3_uint64)k * sizeof(int));
+  int rc = SQLITE_NOMEM;
+  if (!assignments || !sums || !counts) {
+    goto cleanup;
+  }
+  for (int i = 0; i < n; i++) {
+    assignments[i] = -1;
+  }
+  rc = ivf_kmeans_init_plusplus(vectors, n, dimensions, k, seed, out_centroids);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  for (int iter = 0; iter < max_iter; iter++) {
+    int changed = 0;
+    for (int i = 0; i < n; i++) {
+      int nearest = ivf_kmeans_nearest(&vectors[(size_t)i * dimensions],
+                                       out_centroids, dimensions, k);
+      if (nearest != assignments[i]) {
+        assignments[i] = nearest;
+        changed++;
+      }
+    }
+    if (changed == 0) {
+      break;
+    }
+    memset(sums, 0, (size_t)k * dimensions * sizeof(f32));
+    memset(counts, 0, (size_t)k * sizeof(int));
+    for (int i = 0; i < n; i++) {
+      int c = assignments[i];
+      counts[c]++;
+      for (size_t d = 0; d < dimensions; d++) {
+        sums[(size_t)c * dimensions + d] += vectors[(size_t)i * dimensions + d];
+      }
+    }
+    for (int c = 0; c < k; c++) {
+      f32 *centroid = &out_centroids[(size_t)c * dimensions];
+      if (counts[c] > 0) {
+        for (size_t d = 0; d < dimensions; d++) {
+          centroid[d] = sums[(size_t)c * dimensions + d] / (f32)counts[c];
+        }
+        continue;
+      }
+      f32 maxDistance = -1.0f;
+      int farthest = 0;
+      for (int i = 0; i < n; i++) {
+        f32 distance = ivf_l2_distance(
+            &vectors[(size_t)i * dimensions],
+            &out_centroids[(size_t)assignments[i] * dimensions], dimensions);
+        if (distance > maxDistance) {
+          maxDistance = distance;
+          farthest = i;
+        }
+      }
+      memcpy(centroid, &vectors[(size_t)farthest * dimensions],
+             dimensions * sizeof(f32));
+    }
+  }
+  rc = SQLITE_OK;
+
+cleanup:
+  sqlite3_free(assignments);
+  sqlite3_free(sums);
+  sqlite3_free(counts);
+  return rc;
+}
+
+/**
+ * Reads whether column i has centroids into *outTrained, from its
+ * ivf_trained_N row of _info, which every connection's writes keep current.
+ */
+static int ivf_trained(vec0_vtab *p, int i, int *outTrained) {
+  int rc = vec0_cached_stmt(
+      p, &p->ivfStmts[i].trained,
+      "SELECT value FROM \"%w\".\"%w_info\" WHERE key = ?", p->tableName);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  char *zKey = sqlite3_mprintf("ivf_trained_%d", i);
+  if (!zKey) {
+    return SQLITE_NOMEM;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].trained;
+  sqlite3_bind_text(stmt, 1, zKey, -1, sqlite3_free);
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_ROW) {
+    *outTrained = sqlite3_column_int(stmt, 0) == 1;
+    rc = SQLITE_OK;
+  } else if (rc == SQLITE_DONE) {
+    vtab_set_error(&p->base,
+                   "the _info table has no ivf_trained_%d row for vector "
+                   "column %d",
+                   i, i);
+    rc = SQLITE_ERROR;
+  } else {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc;
+}
+
+/**
+ * Sets the ivf_trained_N row of _info of column i.
+ */
+static int ivf_set_trained(vec0_vtab *p, int i, int trained) {
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf("INSERT OR REPLACE INTO " VEC0_SHADOW_INFO_NAME
+                               " (key, value) VALUES (?, ?)",
+                               p->schemaName, p->tableName);
+  char *zKey = sqlite3_mprintf("ivf_trained_%d", i);
+  if (!zSql || !zKey) {
+    sqlite3_free(zSql);
+    sqlite3_free(zKey);
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    sqlite3_free(zKey);
+    return rc;
+  }
+  sqlite3_bind_text(stmt, 1, zKey, -1, sqlite3_free);
+  sqlite3_bind_text(stmt, 2, trained ? "1" : "0", -1, SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Sets or clears the validity bit of slot in cell cellId of column i, and
+ * adds delta to the cell's count of rows.
+ */
+static int ivf_cell_mark(vec0_vtab *p, int i, i64 cellId, int slot, int valid,
+                         int delta) {
+  sqlite3_blob *blob = NULL;
+  int rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowIvfCellsNames[i],
+                             "validity", cellId, 1, &blob);
+  if (rc != SQLITE_OK) {
+    return vec0_error_rc(rc);
+  }
+  u8 byte;
+  if (sqlite3_blob_bytes(blob) != VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT) {
+    sqlite3_blob_close(blob);
+    vtab_set_error(&p->base,
+                   "cell %lld of the IVF index of vector column %d is corrupt",
+                   cellId, i);
+    return SQLITE_ERROR;
+  }
+  rc = sqlite3_blob_read(blob, &byte, 1, slot / CHAR_BIT);
+  if (rc == SQLITE_OK) {
+    if (valid) {
+      byte |= (u8)(1 << (slot % CHAR_BIT));
+    } else {
+      byte &= (u8) ~(1 << (slot % CHAR_BIT));
+    }
+    rc = sqlite3_blob_write(blob, &byte, 1, slot / CHAR_BIT);
+  }
+  int brc = sqlite3_blob_close(blob);
+  if (rc == SQLITE_OK) {
+    rc = brc;
+  }
+  if (rc != SQLITE_OK) {
+    return vec0_error_rc(rc);
+  }
+
+  rc = vec0_cached_stmt(p, &p->ivfStmts[i].cellCount,
+                        "UPDATE \"%w\".\"%w\" SET n_vectors = n_vectors + ? "
+                        "WHERE rowid = ?",
+                        p->shadowIvfCellsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].cellCount;
+  sqlite3_bind_int(stmt, 1, delta);
+  sqlite3_bind_int64(stmt, 2, cellId);
+  rc = sqlite3_step(stmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Writes n bytes of data at offset in column zColumn of row cellId of the
+ * cells of column i.
+ */
+static int ivf_cell_write(vec0_vtab *p, int i, i64 cellId, const char *zColumn,
+                          const void *data, int n, int offset) {
+  sqlite3_blob *blob = NULL;
+  int rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowIvfCellsNames[i],
+                             zColumn, cellId, 1, &blob);
+  if (rc != SQLITE_OK) {
+    return vec0_error_rc(rc);
+  }
+  if (sqlite3_blob_bytes(blob) < offset + n) {
+    sqlite3_blob_close(blob);
+    vtab_set_error(&p->base,
+                   "cell %lld of the IVF index of vector column %d is corrupt",
+                   cellId, i);
+    return SQLITE_ERROR;
+  }
+  rc = sqlite3_blob_write(blob, data, n, offset);
+  int brc = sqlite3_blob_close(blob);
+  if (rc == SQLITE_OK) {
+    rc = brc;
+  }
+  return rc == SQLITE_OK ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Places row rowid of column i, whose vector the cells hold as qvector, in the
+ * first free slot of a cell of centroid centroidId, making a cell when every
+ * cell of the centroid is full, and records the cell and slot in
+ * _ivf_rowid_mapNN.
+ */
+static int ivf_place(vec0_vtab *p, int i, i64 centroidId, i64 rowid,
+                     const void *qvector) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  int vectorSize = ivf_vector_size(col);
+  int found = 0;
+  i64 cellId = 0;
+  int slot = -1;
+
+  int rc = vec0_cached_stmt(p, &p->ivfStmts[i].cellFind,
+                            "SELECT rowid, validity FROM \"%w\".\"%w\" WHERE "
+                            "centroid_id = ? AND n_vectors < ? LIMIT 1",
+                            p->shadowIvfCellsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].cellFind;
+  sqlite3_bind_int64(stmt, 1, centroidId);
+  sqlite3_bind_int(stmt, 2, VEC0_IVF_CELL_MAX_VECTORS);
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_ROW) {
+    found = 1;
+    cellId = sqlite3_column_int64(stmt, 0);
+    const u8 *validity = sqlite3_column_blob(stmt, 1);
+    if (validity &&
+        sqlite3_column_bytes(stmt, 1) == VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT) {
+      for (int s = 0; s < VEC0_IVF_CELL_MAX_VECTORS; s++) {
+        if (!(validity[s / CHAR_BIT] & (1 << (s % CHAR_BIT)))) {
+          slot = s;
+          break;
+        }
+      }
+    }
+    rc = SQLITE_OK;
+  } else if (rc == SQLITE_DONE) {
+    rc = SQLITE_OK;
+  } else {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  if (found && slot < 0) {
+    // the count says the cell has room, but no slot is free
+    vtab_set_error(&p->base,
+                   "cell %lld of the IVF index of vector column %d is corrupt",
+                   cellId, i);
+    return SQLITE_ERROR;
+  }
+
+  if (!found) {
+    char *zSql = sqlite3_mprintf(
+        "INSERT INTO \"%w\".\"%w\" (centroid_id, n_vectors, validity, rowids, "
+        "vectors) VALUES (?, 0, ?, ?, ?)",
+        p->schemaName, p->shadowIvfCellsNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    stmt = NULL;
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, centroidId);
+    sqlite3_bind_zeroblob(stmt, 2, VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT);
+    sqlite3_bind_zeroblob(stmt, 3, VEC0_IVF_CELL_MAX_VECTORS * sizeof(i64));
+    sqlite3_bind_zeroblob(stmt, 4, VEC0_IVF_CELL_MAX_VECTORS * vectorSize);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+      return vec0_error_rc(rc);
+    }
+    cellId = sqlite3_last_insert_rowid(p->db);
+    slot = 0;
+  }
+
+  rc = ivf_cell_write(p, i, cellId, "rowids", &rowid, sizeof(i64),
+                      slot * (int)sizeof(i64));
+  if (rc == SQLITE_OK) {
+    rc = ivf_cell_write(p, i, cellId, "vectors", qvector, vectorSize,
+                        slot * vectorSize);
+  }
+  if (rc == SQLITE_OK) {
+    rc = ivf_cell_mark(p, i, cellId, slot, 1, 1);
+  }
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  rc = vec0_cached_stmt(p, &p->ivfStmts[i].mapWrite,
+                        "INSERT INTO \"%w\".\"%w\" (rowid, cell_id, slot) "
+                        "VALUES (?, ?, ?)",
+                        p->shadowIvfRowidMapNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  stmt = p->ivfStmts[i].mapWrite;
+  sqlite3_bind_int64(stmt, 1, rowid);
+  sqlite3_bind_int64(stmt, 2, cellId);
+  sqlite3_bind_int(stmt, 3, slot);
+  rc = sqlite3_step(stmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Reads the cell and slot of row rowid of column i from _ivf_rowid_mapNN.
+ * Returns SQLITE_EMPTY when the row has none.
+ */
+static int ivf_map_read(vec0_vtab *p, int i, i64 rowid, i64 *outCellId,
+                        int *outSlot) {
+  int rc = vec0_cached_stmt(
+      p, &p->ivfStmts[i].mapRead,
+      "SELECT cell_id, slot FROM \"%w\".\"%w\" WHERE rowid = ?",
+      p->shadowIvfRowidMapNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].mapRead;
+  sqlite3_bind_int64(stmt, 1, rowid);
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_ROW) {
+    *outCellId = sqlite3_column_int64(stmt, 0);
+    *outSlot = sqlite3_column_int(stmt, 1);
+    rc = SQLITE_OK;
+    if (*outSlot < 0 || *outSlot >= VEC0_IVF_CELL_MAX_VECTORS) {
+      vtab_set_error(&p->base,
+                     "row %lld of the IVF index of vector column %d is "
+                     "corrupt",
+                     rowid, i);
+      rc = SQLITE_ERROR;
+    }
+  } else if (rc == SQLITE_DONE) {
+    rc = SQLITE_EMPTY;
+  } else {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc;
+}
+
+/**
+ * Takes row rowid of column i out of its cell and out of _ivf_rowid_mapNN,
+ * if it is in one.
+ */
+static int ivf_unplace(vec0_vtab *p, int i, i64 rowid) {
+  i64 cellId;
+  int slot;
+  int rc = ivf_map_read(p, i, rowid, &cellId, &slot);
+  if (rc == SQLITE_EMPTY) {
+    return SQLITE_OK;
+  }
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = ivf_cell_mark(p, i, cellId, slot, 0, -1);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = vec0_cached_stmt(p, &p->ivfStmts[i].mapDelete,
+                        "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                        p->shadowIvfRowidMapNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].mapDelete;
+  sqlite3_bind_int64(stmt, 1, rowid);
+  rc = sqlite3_step(stmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Reads the centroid of column i nearest qvector, a vector as the cells hold
+ * it, into *outCentroidId. Fails when the column has no centroid.
+ */
+static int ivf_nearest_centroid(vec0_vtab *p, int i, const void *qvector,
+                                i64 *outCentroidId) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  int vectorSize = ivf_vector_size(col);
+  int rc = vec0_cached_stmt(p, &p->ivfStmts[i].centroids,
+                            "SELECT centroid_id, centroid FROM \"%w\".\"%w\"",
+                            p->shadowIvfCentroidsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].centroids;
+  f32 minDistance = FLT_MAX;
+  int found = 0;
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    const void *centroid = sqlite3_column_blob(stmt, 1);
+    if (!centroid || sqlite3_column_bytes(stmt, 1) != vectorSize) {
+      vtab_set_error(&p->base,
+                     "centroid %lld of the IVF index of vector column %d is "
+                     "corrupt",
+                     sqlite3_column_int64(stmt, 0), i);
+      rc = SQLITE_ERROR;
+      break;
+    }
+    f32 distance = ivf_distance(col, qvector, centroid);
+    if (!found || distance < minDistance) {
+      minDistance = distance;
+      *outCentroidId = sqlite3_column_int64(stmt, 0);
+      found = 1;
+    }
+  }
+  if (rc == SQLITE_DONE) {
+    rc = SQLITE_OK;
+    if (!found) {
+      vtab_set_error(&p->base, "vector column %d has no IVF centroids", i);
+      rc = SQLITE_ERROR;
+    }
+  } else if (rc != SQLITE_ERROR) {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_reset(stmt);
+  return rc;
+}
+
+/**
+ * Adds row rowid of column i, with float32 vector, to the index: in a cell of
+ * the centroid nearest its quantized vector, or of no centroid while the
+ * column has none, and with a quantizer to _ivf_vectorsNN.
+ */
+static int ivf_insert(vec0_vtab *p, int i, i64 rowid, const void *vector) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  void *qvector = sqlite3_malloc(ivf_vector_size(col));
+  if (!qvector) {
+    return SQLITE_NOMEM;
+  }
+  ivf_quantize(col, vector, qvector);
+  int trained = 0;
+  i64 centroidId = VEC0_IVF_UNASSIGNED_CENTROID_ID;
+  int rc = ivf_trained(p, i, &trained);
+  if (rc == SQLITE_OK && trained) {
+    rc = ivf_nearest_centroid(p, i, qvector, &centroidId);
+  }
+  if (rc == SQLITE_OK) {
+    rc = ivf_place(p, i, centroidId, rowid, qvector);
+  }
+  sqlite3_free(qvector);
+  if (rc != SQLITE_OK || col->ivf.quantizer == VEC0_IVF_QUANTIZER_NONE) {
+    return rc;
+  }
+
+  rc = vec0_cached_stmt(
+      p, &p->ivfStmts[i].vectorWrite,
+      "INSERT INTO \"%w\".\"%w\" (rowid, vector) VALUES (?, ?)",
+      p->shadowIvfVectorsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].vectorWrite;
+  sqlite3_bind_int64(stmt, 1, rowid);
+  sqlite3_bind_blob(stmt, 2, vector, (int)(col->dimensions * sizeof(f32)),
+                    SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Removes row rowid of column i from the index.
+ */
+static int ivf_delete(vec0_vtab *p, int i, i64 rowid) {
+  int rc = ivf_unplace(p, i, rowid);
+  if (rc != SQLITE_OK ||
+      p->vector_columns[i].ivf.quantizer == VEC0_IVF_QUANTIZER_NONE) {
+    return rc;
+  }
+  rc = vec0_cached_stmt(p, &p->ivfStmts[i].vectorDelete,
+                        "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+                        p->shadowIvfVectorsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].vectorDelete;
+  sqlite3_bind_int64(stmt, 1, rowid);
+  rc = sqlite3_step(stmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Reads the float32 vector of row rowid of column i into *outVector, to be
+ * freed with sqlite3_free(), and its size into *outVectorSize unless that is
+ * NULL: from its cell, or with a quantizer from _ivf_vectorsNN. Returns
+ * SQLITE_EMPTY when the column has no vector with that rowid.
+ */
+static int ivf_vector_read(vec0_vtab *p, int i, i64 rowid, void **outVector,
+                           int *outVectorSize) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  int size = (int)(col->dimensions * sizeof(f32));
+  void *vector = NULL;
+  int rc;
+  if (col->ivf.quantizer == VEC0_IVF_QUANTIZER_NONE) {
+    i64 cellId;
+    int slot;
+    rc = ivf_map_read(p, i, rowid, &cellId, &slot);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_blob *blob = NULL;
+    rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowIvfCellsNames[i],
+                           "vectors", cellId, 0, &blob);
+    if (rc != SQLITE_OK) {
+      return vec0_error_rc(rc);
+    }
+    if (sqlite3_blob_bytes(blob) < (slot + 1) * size) {
+      sqlite3_blob_close(blob);
+      vtab_set_error(&p->base,
+                     "cell %lld of the IVF index of vector column %d is "
+                     "corrupt",
+                     cellId, i);
+      return SQLITE_ERROR;
+    }
+    vector = sqlite3_malloc(size);
+    rc = vector ? sqlite3_blob_read(blob, vector, size, slot * size)
+                : SQLITE_NOMEM;
+    sqlite3_blob_close(blob);
+    if (rc != SQLITE_OK) {
+      sqlite3_free(vector);
+      return vec0_error_rc(rc);
+    }
+  } else {
+    rc = vec0_cached_stmt(p, &p->ivfStmts[i].vectorRead,
+                          "SELECT vector FROM \"%w\".\"%w\" WHERE rowid = ?",
+                          p->shadowIvfVectorsNames[i]);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_stmt *stmt = p->ivfStmts[i].vectorRead;
+    sqlite3_bind_int64(stmt, 1, rowid);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+      const void *blob = sqlite3_column_blob(stmt, 0);
+      if (!blob || sqlite3_column_bytes(stmt, 0) != size) {
+        vtab_set_error(&p->base,
+                       "the IVF vector of row %lld of vector column %d is "
+                       "corrupt",
+                       rowid, i);
+        rc = SQLITE_ERROR;
+      } else {
+        vector = sqlite3_malloc(size);
+        if (vector) {
+          memcpy(vector, blob, size);
+          rc = SQLITE_OK;
+        } else {
+          rc = SQLITE_NOMEM;
+        }
+      }
+    } else {
+      rc = rc == SQLITE_DONE ? SQLITE_EMPTY : vec0_error_rc(rc);
+    }
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+  *outVector = vector;
+  if (outVectorSize) {
+    *outVectorSize = size;
+  }
+  return SQLITE_OK;
+}
+
+/**
+ * Runs zFormat, a statement without parameters on table zTable of the schema,
+ * to its end.
+ */
+static int ivf_exec(vec0_vtab *p, const char *zFormat, const char *zTable) {
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf(zFormat, p->schemaName, zTable);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+}
+
+/**
+ * Appends to rowids and vectors the rowid and the vector, as the cells of
+ * column i hold it, of each row in a cell the statement stmt reads, whose
+ * columns are a cell's rowid, validity, rowids and vectors. Leaves stmt reset.
+ */
+static int ivf_read_cells(vec0_vtab *p, int i, sqlite3_stmt *stmt,
+                          struct Array *rowids, struct Array *vectors) {
+  int vectorSize = ivf_vector_size(&p->vector_columns[i]);
+  int rc;
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    rc = SQLITE_OK;
+    const u8 *validity = sqlite3_column_blob(stmt, 1);
+    const u8 *cellRowids = sqlite3_column_blob(stmt, 2);
+    const u8 *cellVectors = sqlite3_column_blob(stmt, 3);
+    if (!validity || !cellRowids || !cellVectors ||
+        sqlite3_column_bytes(stmt, 1) != VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT ||
+        sqlite3_column_bytes(stmt, 2) !=
+            VEC0_IVF_CELL_MAX_VECTORS * (int)sizeof(i64) ||
+        sqlite3_column_bytes(stmt, 3) !=
+            VEC0_IVF_CELL_MAX_VECTORS * vectorSize) {
+      vtab_set_error(&p->base,
+                     "cell %lld of the IVF index of vector column %d is "
+                     "corrupt",
+                     sqlite3_column_int64(stmt, 0), i);
+      rc = SQLITE_ERROR;
+      break;
+    }
+    for (int s = 0; s < VEC0_IVF_CELL_MAX_VECTORS; s++) {
+      if (!(validity[s / CHAR_BIT] & (1 << (s % CHAR_BIT)))) {
+        continue;
+      }
+      i64 rowid;
+      memcpy(&rowid, cellRowids + (size_t)s * sizeof(i64), sizeof(i64));
+      rc = array_append(rowids, &rowid);
+      if (rc == SQLITE_OK) {
+        rc = array_append(vectors, cellVectors + (size_t)s * vectorSize);
+      }
+      if (rc != SQLITE_OK) {
+        break;
+      }
+    }
+    if (rc != SQLITE_OK) {
+      break;
+    }
+  }
+  if (rc == SQLITE_DONE) {
+    rc = SQLITE_OK;
+  } else if (rc != SQLITE_ERROR && rc != SQLITE_NOMEM) {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc;
+}
+
+/**
+ * Appends to rowids and vectors the rowid and float32 vector of every row of
+ * column i: from its cells, or with a quantizer from _ivf_vectorsNN.
+ */
+static int ivf_load_vectors(vec0_vtab *p, int i, struct Array *rowids,
+                            struct Array *vectors) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  if (col->ivf.quantizer == VEC0_IVF_QUANTIZER_NONE) {
+    char *zSql = sqlite3_mprintf(
+        "SELECT rowid, validity, rowids, vectors FROM \"%w\".\"%w\"",
+        p->schemaName, p->shadowIvfCellsNames[i]);
+    if (!zSql) {
+      return SQLITE_NOMEM;
+    }
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc == SQLITE_OK) {
+      rc = ivf_read_cells(p, i, stmt, rowids, vectors);
+    }
+    sqlite3_finalize(stmt);
+    return rc;
+  }
+
+  int size = (int)(col->dimensions * sizeof(f32));
+  char *zSql = sqlite3_mprintf("SELECT rowid, vector FROM \"%w\".\"%w\"",
+                               p->schemaName, p->shadowIvfVectorsNames[i]);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    i64 rowid = sqlite3_column_int64(stmt, 0);
+    const void *vector = sqlite3_column_blob(stmt, 1);
+    if (!vector || sqlite3_column_bytes(stmt, 1) != size) {
+      vtab_set_error(&p->base,
+                     "the IVF vector of row %lld of vector column %d is "
+                     "corrupt",
+                     rowid, i);
+      rc = SQLITE_ERROR;
+      break;
+    }
+    rc = array_append(rowids, &rowid);
+    if (rc == SQLITE_OK) {
+      rc = array_append(vectors, vector);
+    }
+    if (rc != SQLITE_OK) {
+      break;
+    }
+  }
+  if (rc == SQLITE_DONE) {
+    rc = SQLITE_OK;
+  } else if (rc != SQLITE_ERROR && rc != SQLITE_NOMEM) {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_finalize(stmt);
+  return rc;
+}
+
+struct IvfPlacement {
+  i64 centroidId;
+  int row;
+};
+
+static int ivf_placement_cmp(const void *a, const void *b) {
+  const struct IvfPlacement *x = a;
+  const struct IvfPlacement *y = b;
+  if (x->centroidId != y->centroidId) {
+    return x->centroidId < y->centroidId ? -1 : 1;
+  }
+  return x->row < y->row ? -1 : (x->row > y->row);
+}
+
+/**
+ * Replaces the centroids, cells and row map of column i: nCentroids float32
+ * centroids with ids from 0, and n rows, rowids and float32 vectors, each in
+ * cells of the centroid centroidOf gives it.
+ */
+static int ivf_rebuild(vec0_vtab *p, int i, int n, const i64 *rowids,
+                       const f32 *vectors, const i64 *centroidOf,
+                       int nCentroids, const f32 *centroids) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  int vectorSize = ivf_vector_size(col);
+  sqlite3_stmt *stmtCentroid = NULL;
+  sqlite3_stmt *stmtCell = NULL;
+  struct IvfPlacement *order = NULL;
+  u8 *validity = NULL;
+  i64 *cellRowids = NULL;
+  u8 *cellVectors = NULL;
+  void *qvector = NULL;
+
+  int rc =
+      ivf_exec(p, "DELETE FROM \"%w\".\"%w\"", p->shadowIvfCentroidsNames[i]);
+  if (rc == SQLITE_OK) {
+    rc = ivf_exec(p, "DELETE FROM \"%w\".\"%w\"", p->shadowIvfCellsNames[i]);
+  }
+  if (rc == SQLITE_OK) {
+    rc = ivf_exec(p, "DELETE FROM \"%w\".\"%w\"", p->shadowIvfRowidMapNames[i]);
+  }
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  qvector = sqlite3_malloc(vectorSize);
+  validity = sqlite3_malloc(VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT);
+  cellRowids = sqlite3_malloc(VEC0_IVF_CELL_MAX_VECTORS * sizeof(i64));
+  cellVectors =
+      sqlite3_malloc64((sqlite3_uint64)VEC0_IVF_CELL_MAX_VECTORS * vectorSize);
+  order = sqlite3_malloc64((sqlite3_uint64)(n > 0 ? n : 1) * sizeof(*order));
+  if (!qvector || !validity || !cellRowids || !cellVectors || !order) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+
+  char *zSql = sqlite3_mprintf(
+      "INSERT INTO \"%w\".\"%w\" (centroid_id, centroid) VALUES (?, ?)",
+      p->schemaName, p->shadowIvfCentroidsNames[i]);
+  if (!zSql) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmtCentroid, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  for (int c = 0; c < nCentroids; c++) {
+    ivf_quantize(col, &centroids[(size_t)c * col->dimensions], qvector);
+    sqlite3_bind_int(stmtCentroid, 1, c);
+    sqlite3_bind_blob(stmtCentroid, 2, qvector, vectorSize, SQLITE_STATIC);
+    rc = sqlite3_step(stmtCentroid);
+    sqlite3_reset(stmtCentroid);
+    if (rc != SQLITE_DONE) {
+      rc = vec0_error_rc(rc);
+      goto cleanup;
+    }
+  }
+
+  zSql = sqlite3_mprintf(
+      "INSERT INTO \"%w\".\"%w\" (centroid_id, n_vectors, validity, rowids, "
+      "vectors) VALUES (?, ?, ?, ?, ?)",
+      p->schemaName, p->shadowIvfCellsNames[i]);
+  if (!zSql) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmtCell, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  rc = vec0_cached_stmt(p, &p->ivfStmts[i].mapWrite,
+                        "INSERT INTO \"%w\".\"%w\" (rowid, cell_id, slot) "
+                        "VALUES (?, ?, ?)",
+                        p->shadowIvfRowidMapNames[i]);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+
+  for (int r = 0; r < n; r++) {
+    order[r].centroidId = centroidOf[r];
+    order[r].row = r;
+  }
+  qsort(order, n, sizeof(*order), ivf_placement_cmp);
+
+  // fill cells of up to VEC0_IVF_CELL_MAX_VECTORS rows, one centroid at a time
+  for (int start = 0; start < n;) {
+    int count = 0;
+    memset(validity, 0, VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT);
+    memset(cellRowids, 0, VEC0_IVF_CELL_MAX_VECTORS * sizeof(i64));
+    memset(cellVectors, 0, (size_t)VEC0_IVF_CELL_MAX_VECTORS * vectorSize);
+    while (start + count < n && count < VEC0_IVF_CELL_MAX_VECTORS &&
+           order[start + count].centroidId == order[start].centroidId) {
+      int row = order[start + count].row;
+      validity[count / CHAR_BIT] |= (u8)(1 << (count % CHAR_BIT));
+      cellRowids[count] = rowids[row];
+      ivf_quantize(col, &vectors[(size_t)row * col->dimensions],
+                   cellVectors + (size_t)count * vectorSize);
+      count++;
+    }
+    sqlite3_bind_int64(stmtCell, 1, order[start].centroidId);
+    sqlite3_bind_int(stmtCell, 2, count);
+    sqlite3_bind_blob(stmtCell, 3, validity,
+                      VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT, SQLITE_STATIC);
+    sqlite3_bind_blob(stmtCell, 4, cellRowids,
+                      VEC0_IVF_CELL_MAX_VECTORS * (int)sizeof(i64),
+                      SQLITE_STATIC);
+    sqlite3_bind_blob(stmtCell, 5, cellVectors,
+                      VEC0_IVF_CELL_MAX_VECTORS * vectorSize, SQLITE_STATIC);
+    rc = sqlite3_step(stmtCell);
+    sqlite3_reset(stmtCell);
+    if (rc != SQLITE_DONE) {
+      rc = vec0_error_rc(rc);
+      goto cleanup;
+    }
+    i64 cellId = sqlite3_last_insert_rowid(p->db);
+    sqlite3_stmt *stmtMap = p->ivfStmts[i].mapWrite;
+    for (int s = 0; s < count; s++) {
+      sqlite3_bind_int64(stmtMap, 1, cellRowids[s]);
+      sqlite3_bind_int64(stmtMap, 2, cellId);
+      sqlite3_bind_int(stmtMap, 3, s);
+      rc = sqlite3_step(stmtMap);
+      sqlite3_reset(stmtMap);
+      if (rc != SQLITE_DONE) {
+        rc = vec0_error_rc(rc);
+        goto cleanup;
+      }
+    }
+    sqlite3_clear_bindings(stmtMap);
+    start += count;
+  }
+  rc = SQLITE_OK;
+
+cleanup:
+  if (p->ivfStmts[i].mapWrite) {
+    sqlite3_reset(p->ivfStmts[i].mapWrite);
+    sqlite3_clear_bindings(p->ivfStmts[i].mapWrite);
+  }
+  sqlite3_finalize(stmtCentroid);
+  sqlite3_finalize(stmtCell);
+  sqlite3_free(order);
+  sqlite3_free(validity);
+  sqlite3_free(cellRowids);
+  sqlite3_free(cellVectors);
+  sqlite3_free(qvector);
+  return rc;
+}
+
+/**
+ * compute-centroids for column i: clusters its rows with k-means into nlist
+ * centroids, the column's nlist when nlist is 0 and at most one per row, and
+ * moves each row to the cells of the centroid nearest it.
+ */
+static int ivf_compute_centroids(vec0_vtab *p, int i, int nlist, int maxIter,
+                                 u32 seed) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  size_t dimensions = col->dimensions;
+  struct Array rowids, vectors;
+  f32 *centroids = NULL;
+  i64 *centroidOf = NULL;
+  int rc = array_init(&rowids, sizeof(i64), 64);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = array_init(&vectors, dimensions * sizeof(f32), 64);
+  if (rc != SQLITE_OK) {
+    array_cleanup(&rowids);
+    return rc;
+  }
+  rc = ivf_load_vectors(p, i, &rowids, &vectors);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  int n = (int)rowids.length;
+  if (nlist <= 0) {
+    nlist = col->ivf.nlist;
+  }
+  if (nlist <= 0) {
+    vtab_set_error(&p->base,
+                   "compute-centroids needs nlist for vector column %d, which "
+                   "was created with nlist=0",
+                   i);
+    rc = SQLITE_ERROR;
+    goto cleanup;
+  }
+  if (n == 0) {
+    vtab_set_error(&p->base,
+                   "compute-centroids needs at least one row in vector "
+                   "column %d",
+                   i);
+    rc = SQLITE_ERROR;
+    goto cleanup;
+  }
+  if (nlist > n) {
+    nlist = n;
+  }
+  const f32 *data = (const f32 *)vectors.z;
+  centroids =
+      sqlite3_malloc64((sqlite3_uint64)nlist * dimensions * sizeof(f32));
+  centroidOf = sqlite3_malloc64((sqlite3_uint64)n * sizeof(i64));
+  if (!centroids || !centroidOf) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  rc = ivf_kmeans(data, n, dimensions, nlist, maxIter, seed, centroids);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  for (int r = 0; r < n; r++) {
+    f32 minDistance = FLT_MAX;
+    centroidOf[r] = 0;
+    for (int c = 0; c < nlist; c++) {
+      f32 distance = vec0_compute_distance(col, &data[(size_t)r * dimensions],
+                                           &centroids[(size_t)c * dimensions]);
+      if (distance < minDistance) {
+        minDistance = distance;
+        centroidOf[r] = c;
+      }
+    }
+  }
+  rc = ivf_rebuild(p, i, n, (const i64 *)rowids.z, data, centroidOf, nlist,
+                   centroids);
+  if (rc == SQLITE_OK) {
+    rc = ivf_set_trained(p, i, 1);
+  }
+
+cleanup:
+  sqlite3_free(centroids);
+  sqlite3_free(centroidOf);
+  array_cleanup(&rowids);
+  array_cleanup(&vectors);
+  return rc;
+}
+
+/**
+ * clear-centroids for column i: removes its centroids and moves every row to
+ * cells of no centroid.
+ */
+static int ivf_clear_centroids(vec0_vtab *p, int i) {
+  struct Array rowids, vectors;
+  i64 *centroidOf = NULL;
+  int rc = array_init(&rowids, sizeof(i64), 64);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = array_init(&vectors, p->vector_columns[i].dimensions * sizeof(f32), 64);
+  if (rc != SQLITE_OK) {
+    array_cleanup(&rowids);
+    return rc;
+  }
+  rc = ivf_load_vectors(p, i, &rowids, &vectors);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  int n = (int)rowids.length;
+  centroidOf = sqlite3_malloc64((sqlite3_uint64)(n > 0 ? n : 1) * sizeof(i64));
+  if (!centroidOf) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  for (int r = 0; r < n; r++) {
+    centroidOf[r] = VEC0_IVF_UNASSIGNED_CENTROID_ID;
+  }
+  rc = ivf_rebuild(p, i, n, (const i64 *)rowids.z, (const f32 *)vectors.z,
+                   centroidOf, 0, NULL);
+  if (rc == SQLITE_OK) {
+    rc = ivf_set_trained(p, i, 0);
+  }
+
+cleanup:
+  sqlite3_free(centroidOf);
+  array_cleanup(&rowids);
+  array_cleanup(&vectors);
+  return rc;
+}
+
+/**
+ * set-centroid:N for column i: sets its centroid N to the float32 vector.
+ */
+static int ivf_set_centroid(vec0_vtab *p, int i, i64 centroidId,
+                            const f32 *vector) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  int vectorSize = ivf_vector_size(col);
+  sqlite3_stmt *stmt = NULL;
+  void *qvector = sqlite3_malloc(vectorSize);
+  if (!qvector) {
+    return SQLITE_NOMEM;
+  }
+  ivf_quantize(col, vector, qvector);
+  char *zSql = sqlite3_mprintf("INSERT OR REPLACE INTO \"%w\".\"%w\" "
+                               "(centroid_id, centroid) VALUES (?, ?)",
+                               p->schemaName, p->shadowIvfCentroidsNames[i]);
+  int rc =
+      zSql ? sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL) : SQLITE_NOMEM;
+  sqlite3_free(zSql);
+  if (rc == SQLITE_OK) {
+    sqlite3_bind_int64(stmt, 1, centroidId);
+    sqlite3_bind_blob(stmt, 2, qvector, vectorSize, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    rc = rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_free(qvector);
+  if (rc == SQLITE_OK) {
+    rc = ivf_set_trained(p, i, 1);
+  }
+  return rc;
+}
+
+/**
+ * assign-vectors for column i: moves each row in a cell of no centroid to the
+ * cells of the centroid nearest it.
+ */
+static int ivf_assign_vectors(vec0_vtab *p, int i) {
+  struct Array rowids, qvectors;
+  sqlite3_stmt *stmt = NULL;
+  int trained = 0;
+  int rc = ivf_trained(p, i, &trained);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  if (!trained) {
+    vtab_set_error(&p->base, "vector column %d has no IVF centroids", i);
+    return SQLITE_ERROR;
+  }
+  rc = array_init(&rowids, sizeof(i64), 64);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = array_init(&qvectors, ivf_vector_size(&p->vector_columns[i]), 64);
+  if (rc != SQLITE_OK) {
+    array_cleanup(&rowids);
+    return rc;
+  }
+  char *zSql = sqlite3_mprintf(
+      "SELECT rowid, validity, rowids, vectors FROM \"%w\".\"%w\" WHERE "
+      "centroid_id = ?",
+      p->schemaName, p->shadowIvfCellsNames[i]);
+  if (!zSql) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  sqlite3_bind_int64(stmt, 1, VEC0_IVF_UNASSIGNED_CENTROID_ID);
+  rc = ivf_read_cells(p, i, stmt, &rowids, &qvectors);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
+  for (size_t r = 0; r < rowids.length; r++) {
+    i64 rowid = ((i64 *)rowids.z)[r];
+    const void *qvector = (const u8 *)qvectors.z + r * qvectors.element_size;
+    i64 centroidId;
+    rc = ivf_nearest_centroid(p, i, qvector, &centroidId);
+    if (rc == SQLITE_OK) {
+      rc = ivf_unplace(p, i, rowid);
+    }
+    if (rc == SQLITE_OK) {
+      rc = ivf_place(p, i, centroidId, rowid, qvector);
+    }
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+  }
+  rc =
+      vec0_exec_i64(p, "DELETE FROM \"%w\".\"%w\" WHERE centroid_id = ?",
+                    p->shadowIvfCellsNames[i], VEC0_IVF_UNASSIGNED_CENTROID_ID);
+
+cleanup:
+  sqlite3_finalize(stmt);
+  array_cleanup(&rowids);
+  array_cleanup(&qvectors);
+  return rc;
+}
+
+// a row, or a centroid, and its distance from the query
+struct IvfCandidate {
+  i64 id;
+  f32 distance;
+};
+
+// nearest first, a NaN distance after every number, and by id among equals
+static int ivf_candidate_cmp(const void *a, const void *b) {
+  const struct IvfCandidate *x = a;
+  const struct IvfCandidate *y = b;
+  int xNan = isnan(x->distance);
+  int yNan = isnan(y->distance);
+  if (xNan != yNan) {
+    return xNan - yNan;
+  }
+  if (!xNan && x->distance != y->distance) {
+    return x->distance < y->distance ? -1 : 1;
+  }
+  return x->id < y->id ? -1 : (x->id > y->id);
+}
+
+/**
+ * Appends to candidates each row in a cell of centroid centroidId of column i,
+ * at its distance from qquery, the query as the cells hold vectors.
+ */
+static int ivf_scan_cells(vec0_vtab *p, int i, i64 centroidId,
+                          const void *qquery, struct Array *candidates) {
+  struct VectorColumnDefinition *col = &p->vector_columns[i];
+  int vectorSize = ivf_vector_size(col);
+  int rc = vec0_cached_stmt(p, &p->ivfStmts[i].cellScan,
+                            "SELECT rowid, validity, rowids, vectors FROM "
+                            "\"%w\".\"%w\" WHERE centroid_id = ?",
+                            p->shadowIvfCellsNames[i]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_stmt *stmt = p->ivfStmts[i].cellScan;
+  sqlite3_bind_int64(stmt, 1, centroidId);
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    rc = SQLITE_OK;
+    const u8 *validity = sqlite3_column_blob(stmt, 1);
+    const u8 *cellRowids = sqlite3_column_blob(stmt, 2);
+    const u8 *cellVectors = sqlite3_column_blob(stmt, 3);
+    if (!validity || !cellRowids || !cellVectors ||
+        sqlite3_column_bytes(stmt, 1) != VEC0_IVF_CELL_MAX_VECTORS / CHAR_BIT ||
+        sqlite3_column_bytes(stmt, 2) !=
+            VEC0_IVF_CELL_MAX_VECTORS * (int)sizeof(i64) ||
+        sqlite3_column_bytes(stmt, 3) !=
+            VEC0_IVF_CELL_MAX_VECTORS * vectorSize) {
+      vtab_set_error(&p->base,
+                     "cell %lld of the IVF index of vector column %d is "
+                     "corrupt",
+                     sqlite3_column_int64(stmt, 0), i);
+      rc = SQLITE_ERROR;
+      break;
+    }
+    for (int s = 0; s < VEC0_IVF_CELL_MAX_VECTORS; s++) {
+      if (!(validity[s / CHAR_BIT] & (1 << (s % CHAR_BIT)))) {
+        continue;
+      }
+      struct IvfCandidate candidate;
+      memcpy(&candidate.id, cellRowids + (size_t)s * sizeof(i64), sizeof(i64));
+      candidate.distance =
+          ivf_distance(col, qquery, cellVectors + (size_t)s * vectorSize);
+      rc = array_append(candidates, &candidate);
+      if (rc != SQLITE_OK) {
+        break;
+      }
+    }
+    if (rc != SQLITE_OK) {
+      break;
+    }
+  }
+  if (rc == SQLITE_DONE) {
+    rc = SQLITE_OK;
+  } else if (rc != SQLITE_ERROR && rc != SQLITE_NOMEM) {
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return rc;
+}
+
+/**
+ * The KNN query of column i, indexed by ivf(). With rowid = or rowid IN, the
+ * candidates are the rows they name; otherwise they are the rows in the cells
+ * of the nprobe centroids nearest the query and in the cells of no centroid,
+ * and with a quantizer the k * oversample of them nearest by quantized
+ * distance. Returns the k nearest candidates by exact distance within the
+ * query's distance constraints, nearest first, as vec0Filter_knn_chunks_iter()
+ * does.
+ */
+static int ivf_knn(vec0_vtab *p, struct VectorColumnDefinition *col, int i,
+                   struct Array *arrayRowidsIn, const char *idxStr, int argc,
+                   sqlite3_value **argv, void *queryVector, i64 k,
+                   i64 **out_topk_rowids, f32 **out_topk_distances,
+                   i64 *out_used) {
+  struct Array candidates;
+  struct Array centroids;
+  void *qquery = NULL;
+  i64 *rowids = NULL;
+  f32 *distances = NULL;
+  int rc = array_init(&candidates, sizeof(struct IvfCandidate), 64);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = array_init(&centroids, sizeof(struct IvfCandidate), 64);
+  if (rc != SQLITE_OK) {
+    array_cleanup(&candidates);
+    return rc;
+  }
+
+  if (arrayRowidsIn) {
+    for (size_t j = 0; j < arrayRowidsIn->length; j++) {
+      i64 rowid = ((i64 *)arrayRowidsIn->z)[j];
+      if (j > 0 && rowid == ((i64 *)arrayRowidsIn->z)[j - 1]) {
+        continue;
+      }
+      void *vector = NULL;
+      rc = ivf_vector_read(p, i, rowid, &vector, NULL);
+      if (rc == SQLITE_EMPTY) {
+        rc = SQLITE_OK;
+        continue;
+      }
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+      struct IvfCandidate candidate = {
+          rowid, vec0_compute_distance(col, vector, queryVector)};
+      sqlite3_free(vector);
+      rc = array_append(&candidates, &candidate);
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+    }
+  } else {
+    int vectorSize = ivf_vector_size(col);
+    qquery = sqlite3_malloc(vectorSize);
+    if (!qquery) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    ivf_quantize(col, queryVector, qquery);
+
+    rc = ivf_scan_cells(p, i, VEC0_IVF_UNASSIGNED_CENTROID_ID, qquery,
+                        &candidates);
+    int trained = 0;
+    if (rc == SQLITE_OK) {
+      rc = ivf_trained(p, i, &trained);
+    }
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    if (trained) {
+      rc = vec0_cached_stmt(p, &p->ivfStmts[i].centroids,
+                            "SELECT centroid_id, centroid FROM \"%w\".\"%w\"",
+                            p->shadowIvfCentroidsNames[i]);
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+      sqlite3_stmt *stmt = p->ivfStmts[i].centroids;
+      while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        struct IvfCandidate centroid;
+        centroid.id = sqlite3_column_int64(stmt, 0);
+        const void *blob = sqlite3_column_blob(stmt, 1);
+        if (!blob || sqlite3_column_bytes(stmt, 1) != vectorSize) {
+          vtab_set_error(&p->base,
+                         "centroid %lld of the IVF index of vector column %d "
+                         "is corrupt",
+                         centroid.id, i);
+          rc = SQLITE_ERROR;
+          break;
+        }
+        centroid.distance = ivf_distance(col, qquery, blob);
+        rc = array_append(&centroids, &centroid);
+        if (rc != SQLITE_OK) {
+          break;
+        }
+      }
+      if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+      } else if (rc != SQLITE_ERROR && rc != SQLITE_NOMEM) {
+        rc = vec0_error_rc(rc);
+      }
+      sqlite3_reset(stmt);
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+      qsort(centroids.z, centroids.length, sizeof(struct IvfCandidate),
+            ivf_candidate_cmp);
+      size_t nprobe = (size_t)col->ivf.nprobe;
+      for (size_t c = 0; c < centroids.length && c < nprobe; c++) {
+        i64 centroidId = ((struct IvfCandidate *)centroids.z)[c].id;
+        if (centroidId == VEC0_IVF_UNASSIGNED_CENTROID_ID) {
+          continue;
+        }
+        rc = ivf_scan_cells(p, i, centroidId, qquery, &candidates);
+        if (rc != SQLITE_OK) {
+          goto cleanup;
+        }
+      }
+    }
+
+    if (col->ivf.quantizer != VEC0_IVF_QUANTIZER_NONE) {
+      // rank the nearest by quantized distance by their exact distances
+      qsort(candidates.z, candidates.length, sizeof(struct IvfCandidate),
+            ivf_candidate_cmp);
+      i64 keep = k * col->ivf.oversample;
+      if ((i64)candidates.length > keep) {
+        candidates.length = (size_t)keep;
+      }
+      for (size_t j = 0; j < candidates.length; j++) {
+        struct IvfCandidate *candidate =
+            &((struct IvfCandidate *)candidates.z)[j];
+        void *vector = NULL;
+        rc = ivf_vector_read(p, i, candidate->id, &vector, NULL);
+        if (rc == SQLITE_EMPTY) {
+          vtab_set_error(&p->base,
+                         "row %lld of the IVF index of vector column %d has "
+                         "no vector",
+                         candidate->id, i);
+          rc = SQLITE_ERROR;
+        }
+        if (rc != SQLITE_OK) {
+          goto cleanup;
+        }
+        candidate->distance = vec0_compute_distance(col, vector, queryVector);
+        sqlite3_free(vector);
+      }
+    }
+  }
+
+  qsort(candidates.z, candidates.length, sizeof(struct IvfCandidate),
+        ivf_candidate_cmp);
+  i64 used = (i64)candidates.length;
+  if (used > 0) {
+    rowids = sqlite3_malloc64(used * sizeof(i64));
+    distances = sqlite3_malloc64(used * sizeof(f32));
+    if (!rowids || !distances) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    for (i64 j = 0; j < used; j++) {
+      rowids[j] = ((struct IvfCandidate *)candidates.z)[j].id;
+      distances[j] = ((struct IvfCandidate *)candidates.z)[j].distance;
+    }
+    vec0_knn_keep_within_distance(idxStr, argc, argv, rowids, distances, &used);
+  }
+  if (used > k) {
+    used = k;
+  }
+  if (used == 0) {
+    sqlite3_free(rowids);
+    sqlite3_free(distances);
+    rowids = NULL;
+    distances = NULL;
+  }
+  *out_topk_rowids = rowids;
+  *out_topk_distances = distances;
+  *out_used = used;
+  rowids = NULL;
+  distances = NULL;
+  rc = SQLITE_OK;
+
+cleanup:
+  sqlite3_free(rowids);
+  sqlite3_free(distances);
+  sqlite3_free(qquery);
+  array_cleanup(&candidates);
+  array_cleanup(&centroids);
+  return rc;
+}
+
+/**
+ * Reads the digits of zValue, from min to max, into *out.
+ *
+ * @return SQLITE_OK, or SQLITE_ERROR for any other text.
+ */
+static int ivf_command_int(const char *zValue, i64 min, i64 max, i64 *out) {
+  if (!(*zValue >= '0' && *zValue <= '9')) {
+    return SQLITE_ERROR;
+  }
+  char *zEnd;
+  errno = 0;
+  long long value = strtoll(zValue, &zEnd, 10);
+  if (*zEnd != '\0' || errno == ERANGE || value < min || value > max) {
+    return SQLITE_ERROR;
+  }
+  *out = value;
+  return SQLITE_OK;
+}
+
+/**
+ * Reads the options of `compute-centroids:{...}`, a JSON object whose keys
+ * nlist, max_iterations and seed each take an integer.
+ */
+static int ivf_compute_options(vec0_vtab *p, const char *zJson, int *nlist,
+                               int *maxIter, u32 *seed) {
+  sqlite3_stmt *stmt = NULL;
+  // the outer row makes a row of `{}` too, so its type is checked
+  int rc = sqlite3_prepare_v2(p->db,
+                              "SELECT json_type(?1), key, type, value FROM "
+                              "(SELECT 1) LEFT JOIN json_each(?1)",
+                              -1, &stmt, NULL);
+  if (rc != SQLITE_OK) {
+    vtab_set_error(&p->base, "compute-centroids options: %s",
+                   sqlite3_errmsg(p->db));
+    return vec0_error_rc(rc);
+  }
+  sqlite3_bind_text(stmt, 1, zJson, -1, SQLITE_STATIC);
+  static const struct {
+    const char *zKey;
+    i64 min;
+    i64 max;
+  } aOption[] = {
+      {"nlist", 1, VEC0_IVF_MAX_NLIST},
+      {"max_iterations", 0, INT_MAX},
+      {"seed", 0, UINT32_MAX},
+  };
+  int invalid = 0;
+  while (!invalid && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    const char *zType = (const char *)sqlite3_column_text(stmt, 0);
+    if (!zType || strcmp(zType, "object") != 0) {
+      vtab_set_error(&p->base,
+                     "compute-centroids options must be a JSON object");
+      invalid = 1;
+      break;
+    }
+    if (sqlite3_column_type(stmt, 1) == SQLITE_NULL) {
+      continue;
+    }
+    const char *zKey = (const char *)sqlite3_column_text(stmt, 1);
+    const char *zValueType = (const char *)sqlite3_column_text(stmt, 2);
+    i64 value = sqlite3_column_int64(stmt, 3);
+    size_t o;
+    for (o = 0; o < countof(aOption); o++) {
+      if (zKey && strcmp(zKey, aOption[o].zKey) == 0) {
+        break;
+      }
+    }
+    if (o == countof(aOption)) {
+      vtab_set_error(&p->base, "unknown compute-centroids option: %s",
+                     zKey ? zKey : "");
+      invalid = 1;
+    } else if (!zValueType || strcmp(zValueType, "integer") != 0 ||
+               value < aOption[o].min || value > aOption[o].max) {
+      vtab_set_error(&p->base,
+                     "compute-centroids option %s must be an integer from "
+                     "%lld to %lld",
+                     aOption[o].zKey, aOption[o].min, aOption[o].max);
+      invalid = 1;
+    } else if (o == 0) {
+      *nlist = (int)value;
+    } else if (o == 1) {
+      *maxIter = (int)value;
+    } else {
+      *seed = (u32)value;
+    }
+  }
+  if (invalid) {
+    rc = SQLITE_ERROR;
+  } else if (rc == SQLITE_DONE) {
+    rc = SQLITE_OK;
+  } else {
+    vtab_set_error(&p->base, "compute-centroids options: %s",
+                   sqlite3_errmsg(p->db));
+    rc = vec0_error_rc(rc);
+  }
+  sqlite3_finalize(stmt);
+  return rc;
+}
+
+/**
+ * The commands of columns indexed by ivf(), each applied to every such column
+ * of the table: `nprobe=N` sets the nprobe of this connection's queries;
+ * `compute-centroids` clusters the rows with k-means into nlist centroids and
+ * moves each row to the cells of the nearest, and `compute-centroids:{...}`
+ * does so with the nlist, max_iterations and seed of a JSON object;
+ * `set-centroid:N` sets centroid N to the vector the INSERT gives the column,
+ * of each column given one; `assign-vectors` moves the rows no clustering has
+ * placed to the cells of their nearest centroids; and `clear-centroids`
+ * removes the centroids and moves every row to cells of no centroid. Returns
+ * SQLITE_EMPTY for any other command.
+ */
+static int ivf_handle_command(vec0_vtab *p, const char *command, int argc,
+                              sqlite3_value **argv) {
+  static const char zNprobe[] = "nprobe=";
+  static const char zCompute[] = "compute-centroids";
+  static const char zSetCentroid[] = "set-centroid:";
+  int rc;
+  int hasIvf = 0;
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    hasIvf |= p->vector_columns[i].index_type == VEC0_INDEX_TYPE_IVF;
+  }
+  if (!hasIvf) {
+    return SQLITE_EMPTY;
+  }
+
+  if (strncmp(command, zNprobe, sizeof(zNprobe) - 1) == 0) {
+    i64 nprobe;
+    if (ivf_command_int(command + sizeof(zNprobe) - 1, 1, INT_MAX, &nprobe) !=
+        SQLITE_OK) {
+      vtab_set_error(&p->base, "nprobe must be >= 1");
+      return SQLITE_ERROR;
+    }
+    for (int i = 0; i < p->numVectorColumns; i++) {
+      if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_IVF) {
+        p->vector_columns[i].ivf.nprobe = (int)nprobe;
+      }
+    }
+    return SQLITE_OK;
+  }
+
+  size_t nCompute = sizeof(zCompute) - 1;
+  if (strncmp(command, zCompute, nCompute) == 0 &&
+      (command[nCompute] == '\0' || command[nCompute] == ':')) {
+    int nlist = 0;
+    int maxIter = VEC0_IVF_KMEANS_MAX_ITER;
+    u32 seed = VEC0_IVF_KMEANS_DEFAULT_SEED;
+    if (command[nCompute] == ':') {
+      rc = ivf_compute_options(p, command + nCompute + 1, &nlist, &maxIter,
+                               &seed);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
+    }
+    for (int i = 0; i < p->numVectorColumns; i++) {
+      if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_IVF) {
+        continue;
+      }
+      rc = ivf_compute_centroids(p, i, nlist, maxIter, seed);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
+    }
+    return SQLITE_OK;
+  }
+
+  if (strncmp(command, zSetCentroid, sizeof(zSetCentroid) - 1) == 0) {
+    i64 centroidId;
+    if (ivf_command_int(command + sizeof(zSetCentroid) - 1, 0, INT_MAX,
+                        &centroidId) != SQLITE_OK) {
+      vtab_set_error(&p->base, "set-centroid needs a centroid id from 0 to %d",
+                     INT_MAX);
+      return SQLITE_ERROR;
+    }
+    int set = 0;
+    for (int u = 0; u < vec0_num_defined_user_columns(p); u++) {
+      if (p->user_column_kinds[u] != SQLITE_VEC0_USER_COLUMN_KIND_VECTOR) {
+        continue;
+      }
+      int i = p->user_column_idxs[u];
+      struct VectorColumnDefinition *col = &p->vector_columns[i];
+      int argvIdx = 2 + VEC0_COLUMN_USERN_START + u;
+      if (col->index_type != VEC0_INDEX_TYPE_IVF || argvIdx >= argc ||
+          sqlite3_value_type(argv[argvIdx]) == SQLITE_NULL) {
+        continue;
+      }
+      void *vector;
+      size_t dimensions;
+      enum VectorElementType elementType;
+      vector_cleanup cleanup;
+      char *zError;
+      rc = vector_from_value(argv[argvIdx], &vector, &dimensions, &elementType,
+                             &cleanup, &zError);
+      if (rc != SQLITE_OK) {
+        vtab_set_error(&p->base, "set-centroid vector for \"%.*s\": %z",
+                       col->name_length, col->name, zError);
+        return SQLITE_ERROR;
+      }
+      if (elementType != SQLITE_VEC_ELEMENT_TYPE_FLOAT32 ||
+          dimensions != col->dimensions) {
+        cleanup(vector);
+        vtab_set_error(&p->base,
+                       "set-centroid vector for \"%.*s\" must be a float32 "
+                       "vector of %lld dimensions",
+                       col->name_length, col->name, (i64)col->dimensions);
+        return SQLITE_ERROR;
+      }
+      rc = ivf_set_centroid(p, i, centroidId, vector);
+      cleanup(vector);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
+      set++;
+    }
+    if (!set) {
+      vtab_set_error(&p->base,
+                     "set-centroid needs a vector for an IVF-indexed column");
+      return SQLITE_ERROR;
+    }
+    return SQLITE_OK;
+  }
+
+  int (*apply)(vec0_vtab *, int) = NULL;
+  if (strcmp(command, "assign-vectors") == 0) {
+    apply = ivf_assign_vectors;
+  } else if (strcmp(command, "clear-centroids") == 0) {
+    apply = ivf_clear_centroids;
+  } else {
+    return SQLITE_EMPTY;
+  }
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_IVF) {
+      continue;
+    }
+    rc = apply(p, i);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+  return SQLITE_OK;
+}
+
+#endif
+
 int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
                    const char *idxStr, int argc, sqlite3_value **argv) {
   assert(argc == (int)((strlen(idxStr) - 1) / 4));
@@ -9245,21 +14661,53 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
   }
 #endif
 
-  rc = vec0_chunks_iter(p, idxStr, argc, argv, &stmtChunks);
-  if (rc != SQLITE_OK) {
-    // IMP: V06942_23781
-    vtab_set_error(&p->base, "Error preparing stmtChunk: %s",
-                   sqlite3_errmsg(p->db));
-    goto cleanup;
-  }
+#if SQLITE_VEC_ENABLE_DISKANN
+  // a diskann() column keeps no chunks to scan
+  if (vector_column->index_type != VEC0_INDEX_TYPE_DISKANN)
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+    // an ivf() column's query reads its cells
+    if (vector_column->index_type != VEC0_INDEX_TYPE_IVF)
+#endif
+    {
+      rc = vec0_chunks_iter(p, idxStr, argc, argv, &stmtChunks);
+      if (rc != SQLITE_OK) {
+        // IMP: V06942_23781
+        vtab_set_error(&p->base, "Error preparing stmtChunk: %s",
+                       sqlite3_errmsg(p->db));
+        goto cleanup;
+      }
+    }
 
   i64 *topk_rowids = NULL;
   f32 *topk_distances = NULL;
   i64 k_used = 0;
-  rc = vec0Filter_knn_chunks_iter(p, stmtChunks, vector_column, vectorColumnIdx,
-                                  arrayRowidsIn, aMetadataIn, idxStr, argc,
-                                  argv, queryVector, k, &topk_rowids,
-                                  &topk_distances, &k_used);
+#if SQLITE_VEC_ENABLE_DISKANN
+  if (vector_column->index_type == VEC0_INDEX_TYPE_DISKANN) {
+    rc = diskann_knn(p, vector_column, vectorColumnIdx, arrayRowidsIn, idxStr,
+                     argc, argv, queryVector, k, &topk_rowids, &topk_distances,
+                     &k_used);
+  } else
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+      if (vector_column->index_type == VEC0_INDEX_TYPE_IVF) {
+    rc = ivf_knn(p, vector_column, vectorColumnIdx, arrayRowidsIn, idxStr, argc,
+                 argv, queryVector, k, &topk_rowids, &topk_distances, &k_used);
+  } else
+#endif
+#if SQLITE_VEC_ENABLE_RESCORE
+      if (vector_column->index_type == VEC0_INDEX_TYPE_RESCORE) {
+    rc = rescore_knn(p, stmtChunks, vector_column, vectorColumnIdx,
+                     arrayRowidsIn, idxStr, argc, argv, queryVector, k,
+                     &topk_rowids, &topk_distances, &k_used);
+  } else
+#endif
+  {
+    rc = vec0Filter_knn_chunks_iter(p, stmtChunks, vector_column,
+                                    vectorColumnIdx, arrayRowidsIn, aMetadataIn,
+                                    idxStr, argc, argv, queryVector, k,
+                                    &topk_rowids, &topk_distances, &k_used);
+  }
   if (rc != SQLITE_OK) {
     goto cleanup;
   }
@@ -9652,8 +15100,13 @@ static int vec0Column_fullscan(vec0_vtab *pVtab, vec0_cursor *pCur,
     void *v;
     int sz;
     int vector_idx = vec0_column_idx_to_vector_idx(pVtab, i);
-    int rc = vec0_fullscan_read_vector(pVtab, pCur->fullscan_data, vector_idx,
-                                       &v, &sz);
+    // Only a flat column keeps its vectors in _vector_chunks; the other index
+    // types keep them in tables of their own, read per row.
+    int rc =
+        pVtab->vector_columns[vector_idx].index_type == VEC0_INDEX_TYPE_FLAT
+            ? vec0_fullscan_read_vector(pVtab, pCur->fullscan_data, vector_idx,
+                                        &v, &sz)
+            : vec0_get_vector_data(pVtab, rowid, vector_idx, &v, &sz);
     if (rc != SQLITE_OK) {
       return rc;
     }
@@ -10206,6 +15659,10 @@ int vec0Update_InsertWriteFinalStep(vec0_vtab *p, i64 chunk_rowid,
 
   // Go insert the vector data into the vector chunk shadow tables
   for (int i = 0; i < p->numVectorColumns; i++) {
+    // a column indexed by anything but flat() keeps its vectors elsewhere
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_FLAT) {
+      continue;
+    }
     sqlite3_blob *blobVectors;
     rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowVectorChunksNames[i],
                            "vectors", chunk_rowid, 1, &blobVectors);
@@ -10727,23 +16184,58 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     goto cleanup;
   }
 
-  // Step #2: Find the next "available" position in the _chunks table for this
-  // row.
-  rc = vec0Update_InsertNextAvailableStep(p, partitionKeyValues, &chunk_rowid,
-                                          &chunk_offset, &blobChunksValidity,
-                                          &bufferChunksValidity);
-  if (rc != SQLITE_OK) {
-    goto cleanup;
+  // A table whose every vector column is indexed by diskann() keeps no chunks,
+  // and its rows take no chunk position.
+  if (!vec0_all_columns_diskann(p)) {
+    // Step #2: Find the next "available" position in the _chunks table for
+    // this row.
+    rc = vec0Update_InsertNextAvailableStep(p, partitionKeyValues, &chunk_rowid,
+                                            &chunk_offset, &blobChunksValidity,
+                                            &bufferChunksValidity);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+
+    // Step #3: With the next available chunk position, write out all the
+    //          vectors to their specified location.
+    rc = vec0Update_InsertWriteFinalStep(p, chunk_rowid, chunk_offset, rowid,
+                                         vectorDatas, blobChunksValidity,
+                                         bufferChunksValidity);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+
+#if SQLITE_VEC_ENABLE_RESCORE
+    rc = rescore_on_insert(p, chunk_rowid, chunk_offset, rowid, vectorDatas);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+#endif
   }
 
-  // Step #3: With the next available chunk position, write out all the vectors
-  //          to their specified location.
-  rc = vec0Update_InsertWriteFinalStep(p, chunk_rowid, chunk_offset, rowid,
-                                       vectorDatas, blobChunksValidity,
-                                       bufferChunksValidity);
-  if (rc != SQLITE_OK) {
-    goto cleanup;
+#if SQLITE_VEC_ENABLE_DISKANN
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
+      continue;
+    }
+    rc = diskann_insert(p, i, rowid, vectorDatas[i]);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
   }
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_IVF) {
+      continue;
+    }
+    rc = ivf_insert(p, i, rowid, vectorDatas[i]);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+  }
+#endif
 
   if (p->numAuxiliaryColumns > 0) {
     sqlite3_stmt *stmt;
@@ -10982,6 +16474,10 @@ int vec0Update_Delete_ClearRowid(vec0_vtab *p, i64 chunk_id, i64 chunk_offset) {
 int vec0Update_Delete_ClearVectors(vec0_vtab *p, i64 chunk_id,
                                    i64 chunk_offset) {
   for (int i = 0; i < p->numVectorColumns; i++) {
+    // a column indexed by anything but flat() keeps its vectors elsewhere
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_FLAT) {
+      continue;
+    }
     int rc;
     sqlite3_blob *blobVectors = NULL;
 
@@ -11146,8 +16642,8 @@ done:
 }
 
 // Once a DELETE has cleared the last validity bit of its chunk, delete the
-// chunk's rows from _chunks, _vector_chunksNN and _metadatachunksNN, so their
-// pages are free without an optimize.
+// chunk's rows from _chunks, _vector_chunksNN, _rescore_chunksNN and
+// _metadatachunksNN, so their pages are free without an optimize.
 // https://github.com/asg017/sqlite-vec/commit/cb147c8
 int vec0Update_Delete_DeleteChunk(vec0_vtab *p, i64 chunk_id) {
   int rc;
@@ -11173,6 +16669,10 @@ int vec0Update_Delete_DeleteChunk(vec0_vtab *p, i64 chunk_id) {
   }
 
   for (int i = 0; i < p->numVectorColumns; i++) {
+    // a column indexed by anything but flat() keeps its vectors elsewhere
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_FLAT) {
+      continue;
+    }
     zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_VECTOR_N_NAME
                            " WHERE rowid = ?",
                            p->schemaName, p->tableName, i);
@@ -11191,6 +16691,13 @@ int vec0Update_Delete_DeleteChunk(vec0_vtab *p, i64 chunk_id) {
       return vec0_error_rc(rc);
     }
   }
+
+#if SQLITE_VEC_ENABLE_RESCORE
+  rc = rescore_delete_chunk(p, chunk_id);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+#endif
 
   for (int i = 0; i < p->numMetadataColumns; i++) {
     zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_METADATA_N_NAME
@@ -11243,24 +16750,64 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
     return rc;
   }
 
-  int chunkEmpty;
-  rc = vec0Update_Delete_ClearValidity(p, chunk_id, chunk_offset, &chunkEmpty);
-  if (rc != SQLITE_OK) {
-    return rc;
+#if SQLITE_VEC_ENABLE_DISKANN
+  // 1b. take the row out of the graph of each column indexed by diskann()
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
+      continue;
+    }
+    rc = diskann_delete(p, i, rowid);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
   }
+#endif
 
-  // 3. zero out rowid in chunks.rowids
-  // https://github.com/asg017/sqlite-vec/issues/54
-  rc = vec0Update_Delete_ClearRowid(p, chunk_id, chunk_offset);
-  if (rc != SQLITE_OK) {
-    return rc;
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  // 1c. take the row out of the cells of each column indexed by ivf()
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_IVF) {
+      continue;
+    }
+    rc = ivf_delete(p, i, rowid);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
   }
+#endif
 
-  // 4. zero out any data in vector chunks tables
-  // https://github.com/asg017/sqlite-vec/issues/54
-  rc = vec0Update_Delete_ClearVectors(p, chunk_id, chunk_offset);
-  if (rc != SQLITE_OK) {
-    return rc;
+  // a table whose every vector column is indexed by diskann() keeps no chunks
+  int hasChunks = !vec0_all_columns_diskann(p);
+  int chunkEmpty = 0;
+  if (hasChunks) {
+    rc =
+        vec0Update_Delete_ClearValidity(p, chunk_id, chunk_offset, &chunkEmpty);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+
+    // 3. zero out rowid in chunks.rowids
+    // https://github.com/asg017/sqlite-vec/issues/54
+    rc = vec0Update_Delete_ClearRowid(p, chunk_id, chunk_offset);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+
+    // 4. zero out any data in vector chunks tables
+    // https://github.com/asg017/sqlite-vec/issues/54
+    rc = vec0Update_Delete_ClearVectors(p, chunk_id, chunk_offset);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+
+#if SQLITE_VEC_ENABLE_RESCORE
+    // 4b. zero out the quantized vectors in rescore chunks, and delete the
+    // row's rescore vectors
+    rc = rescore_on_delete(p, chunk_id, chunk_offset, rowid);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+#endif
   }
 
   // 5. delete from _rowids table
@@ -11319,7 +16866,8 @@ int vec0Update_UpdateAuxColumn(vec0_vtab *p, int auxiliary_column_idx,
 }
 
 int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
-                                  int i, sqlite3_value *valueVector) {
+                                  int i, sqlite3_value *valueVector,
+                                  i64 rowid) {
   int rc;
 
   sqlite3_blob *blobVectors = NULL;
@@ -11363,6 +16911,40 @@ int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
     rc = SQLITE_ERROR;
     goto cleanup;
   }
+
+#if SQLITE_VEC_ENABLE_RESCORE
+  // a rescore() column keeps the vector quantized in the row's slot of
+  // _rescore_chunksNN, and as is in its row of _rescore_vectorsNN
+  if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_RESCORE) {
+    rc = rescore_write_quantized(p, i, chunk_id, chunk_offset, vector);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    char *zSql =
+        sqlite3_mprintf("UPDATE \"%w\".\"%w\" SET vector = ? WHERE rowid = ?",
+                        p->schemaName, p->shadowRescoreVectorsNames[i]);
+    if (!zSql) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    sqlite3_free(zSql);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    sqlite3_bind_blob(stmt, 1, vector,
+                      vector_column_byte_size(p->vector_columns[i]),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, rowid);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    rc = rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+    goto cleanup;
+  }
+#else
+  UNUSED_PARAMETER(rowid);
+#endif
 
   rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowVectorChunksNames[i],
                          "vectors", chunk_id, 1, &blobVectors);
@@ -11514,8 +17096,33 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
       continue;
     }
 
+#if SQLITE_VEC_ENABLE_DISKANN
+    // the graph's edges were chosen for the vector the row has
+    // https://github.com/asg017/sqlite-vec/commit/9df59b4
+    if (p->vector_columns[vector_idx].index_type == VEC0_INDEX_TYPE_DISKANN) {
+      vtab_set_error(&p->base,
+                     "UPDATE on vector column \"%.*s\" is not supported for "
+                     "DiskANN indexes.",
+                     p->vector_columns[vector_idx].name_length,
+                     p->vector_columns[vector_idx].name);
+      return SQLITE_ERROR;
+    }
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+    // the row's cell belongs to the centroid nearest the vector it has
+    // https://github.com/asg017/sqlite-vec/commit/9df59b4
+    if (p->vector_columns[vector_idx].index_type == VEC0_INDEX_TYPE_IVF) {
+      vtab_set_error(&p->base,
+                     "UPDATE on vector column \"%.*s\" is not supported for "
+                     "IVF indexes.",
+                     p->vector_columns[vector_idx].name_length,
+                     p->vector_columns[vector_idx].name);
+      return SQLITE_ERROR;
+    }
+#endif
+
     rc = vec0Update_UpdateVectorColumn(p, chunk_id, chunk_offset, vector_idx,
-                                       valueVector);
+                                       valueVector, rowid);
     if (rc != SQLITE_OK) {
       return vec0_error_rc(rc);
     }
@@ -11666,6 +17273,17 @@ done: {
 }
 }
 
+// flat() and rescore() keep a column's vectors in the chunks, at its row's
+// slot, which the optimize moves; diskann() and ivf() keep them by rowid
+static int vec0_index_in_chunks(enum Vec0IndexType index_type) {
+#if SQLITE_VEC_ENABLE_RESCORE
+  if (index_type == VEC0_INDEX_TYPE_RESCORE) {
+    return 1;
+  }
+#endif
+  return index_type == VEC0_INDEX_TYPE_FLAT;
+}
+
 int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
   sqlite3_stmt *stmt = NULL, *partition_key_stmt = NULL;
   int rc;
@@ -11789,6 +17407,9 @@ int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
     }
     // get the vector data from all vector columns of a row
     for (int i = 0; i < p->numVectorColumns; i++) {
+      if (!vec0_index_in_chunks(p->vector_columns[i].index_type)) {
+        continue;
+      }
       rc = vec0_get_vector_data(p, rowid, i, &vectorDatas[i], NULL);
       if (rc != SQLITE_OK) {
         goto cleanup;
@@ -11810,6 +17431,20 @@ int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
     if (rc != SQLITE_OK) {
       goto cleanup;
     }
+#if SQLITE_VEC_ENABLE_RESCORE
+    // the row keeps its rowid, so its rows of _rescore_vectorsNN stay, and
+    // only its quantized vectors move to the new slot
+    for (int i = 0; i < p->numVectorColumns; i++) {
+      if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE) {
+        continue;
+      }
+      rc = rescore_write_quantized(p, i, new_chunk_id, new_chunk_offset,
+                                   vectorDatas[i]);
+      if (rc != SQLITE_OK) {
+        goto cleanup;
+      }
+    }
+#endif
     sqlite3_free((void *)bufferChunksValidity);
     bufferChunksValidity = NULL;
     if (sqlite3_blob_close(blobChunksValidity) != SQLITE_OK) {
@@ -11875,9 +17510,20 @@ int vec0Update_SpecialInsert_Optimize(vec0_vtab *p) {
 
   // 4) clean up old vector chunks
   for (int i = 0; i < p->numVectorColumns; i++) {
-    zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_VECTOR_N_NAME
-                           " WHERE rowid <= ?",
-                           p->schemaName, p->tableName, i);
+    if (!vec0_index_in_chunks(p->vector_columns[i].index_type)) {
+      continue;
+    }
+#if SQLITE_VEC_ENABLE_RESCORE
+    if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_RESCORE) {
+      zSql = sqlite3_mprintf("DELETE FROM \"%w\".\"%w\" WHERE rowid <= ?",
+                             p->schemaName, p->shadowRescoreChunksNames[i]);
+    } else
+#endif
+    {
+      zSql = sqlite3_mprintf("DELETE FROM " VEC0_SHADOW_VECTOR_N_NAME
+                             " WHERE rowid <= ?",
+                             p->schemaName, p->tableName, i);
+    }
     rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
     sqlite3_free((void *)zSql);
     if (rc != SQLITE_OK) {
@@ -11929,7 +17575,8 @@ done:
   return rc;
 }
 
-int vec0Update_SpecialInsert(sqlite3_vtab *pVTab, sqlite3_value *pVal) {
+int vec0Update_SpecialInsert(sqlite3_vtab *pVTab, sqlite3_value *pVal, int argc,
+                             sqlite3_value **argv) {
   vec0_vtab *p = (vec0_vtab *)pVTab;
 
   const char *cmd = (const char *)sqlite3_value_text(pVal);
@@ -11941,6 +17588,28 @@ int vec0Update_SpecialInsert(sqlite3_vtab *pVTab, sqlite3_value *pVal) {
   if (n_bytes == 8 && sqlite3_strnicmp(cmd, "optimize", 8) == 0) {
     return vec0Update_SpecialInsert_Optimize(p);
   }
+#if SQLITE_VEC_ENABLE_RESCORE
+  int rc = rescore_handle_command(p, cmd);
+  if (rc != SQLITE_EMPTY) {
+    return rc;
+  }
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+  int diskannRc = diskann_handle_command(p, cmd);
+  if (diskannRc != SQLITE_EMPTY) {
+    return diskannRc;
+  }
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+  int ivfRc = ivf_handle_command(p, cmd, argc, argv);
+  if (ivfRc != SQLITE_EMPTY) {
+    return ivfRc;
+  }
+#else
+  UNUSED_PARAMETER(argc);
+  UNUSED_PARAMETER(argv);
+#endif
+  vtab_set_error(pVTab, "unknown vec0 command: '%s'", cmd);
   return SQLITE_ERROR;
 }
 
@@ -11955,7 +17624,8 @@ static int vec0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     return vec0_interrupt_result(
         pVTab,
         vec0Update_SpecialInsert(
-            pVTab, argv[2 + vec0_column_table_name_idx((vec0_vtab *)pVTab)]));
+            pVTab, argv[2 + vec0_column_table_name_idx((vec0_vtab *)pVTab)],
+            argc, argv));
   }
   // DELETE operation
   if (argc == 1 && sqlite3_value_type(argv[0]) != SQLITE_NULL) {
@@ -12025,13 +17695,27 @@ static int vec0ShadowName(const char *zName) {
       return 1;
   }
 
-  // "vector_chunksNN", one per vector column
-  static const char zVectorChunks[] = "vector_chunks";
-  size_t n = sizeof(zVectorChunks) - 1;
-  if (sqlite3_strnicmp(zName, zVectorChunks, n) == 0 && zName[n] >= '0' &&
-      zName[n] <= '9' && zName[n + 1] >= '0' && zName[n + 1] <= '9' &&
-      zName[n + 2] == '\0') {
-    return 1;
+  // the tables of each vector column: one of these names followed by the
+  // column's two-digit number, ie "vector_chunks00"
+  static const char *azPerColumn[] = {
+      "vector_chunks",
+#if SQLITE_VEC_ENABLE_RESCORE
+      "rescore_chunks", "rescore_vectors",
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+      "vectors",        "diskann_nodes",   "diskann_buffer",
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+      "ivf_centroids",  "ivf_cells",       "ivf_rowid_map",  "ivf_vectors",
+#endif
+  };
+  for (size_t i = 0; i < countof(azPerColumn); i++) {
+    size_t n = strlen(azPerColumn[i]);
+    if (sqlite3_strnicmp(zName, azPerColumn[i], n) == 0 && zName[n] >= '0' &&
+        zName[n] <= '9' && zName[n + 1] >= '0' && zName[n + 1] <= '9' &&
+        zName[n + 2] == '\0') {
+      return 1;
+    }
   }
   return 0;
 }
@@ -12040,29 +17724,11 @@ static int vec0Begin(sqlite3_vtab *pVTab) {
   UNUSED_PARAMETER(pVTab);
   return SQLITE_OK;
 }
+// A statement left prepared past the commit keeps sqlite3_close() (not _v2)
+// from closing the connection, so the commit finalizes every one the table
+// keeps. https://github.com/asg017/sqlite-vec/commit/fe94171
 static int vec0Sync(sqlite3_vtab *pVTab) {
-  UNUSED_PARAMETER(pVTab);
-  vec0_vtab *p = (vec0_vtab *)pVTab;
-  if (p->stmtLatestChunk) {
-    sqlite3_finalize(p->stmtLatestChunk);
-    p->stmtLatestChunk = NULL;
-  }
-  if (p->stmtRowidsInsertRowid) {
-    sqlite3_finalize(p->stmtRowidsInsertRowid);
-    p->stmtRowidsInsertRowid = NULL;
-  }
-  if (p->stmtRowidsInsertId) {
-    sqlite3_finalize(p->stmtRowidsInsertId);
-    p->stmtRowidsInsertId = NULL;
-  }
-  if (p->stmtRowidsUpdatePosition) {
-    sqlite3_finalize(p->stmtRowidsUpdatePosition);
-    p->stmtRowidsUpdatePosition = NULL;
-  }
-  if (p->stmtRowidsGetChunkPosition) {
-    sqlite3_finalize(p->stmtRowidsGetChunkPosition);
-    p->stmtRowidsGetChunkPosition = NULL;
-  }
+  vec0_free_resources((vec0_vtab *)pVTab);
   return SQLITE_OK;
 }
 static int vec0Commit(sqlite3_vtab *pVTab) {
@@ -12119,23 +17785,53 @@ static int vec0Rename(sqlite3_vtab *pVTab, const char *zName) {
   sqlite3_finalize(stmt);
 
   for (int i = 0; i < p->numVectorColumns; i++) {
-    char *newShadowVectorChunksName =
-        sqlite3_mprintf("%s_vector_chunks%02d", zName, i);
-    if (!newShadowVectorChunksName) {
-      return SQLITE_NOMEM;
+    struct {
+      const char *zOld;
+      const char *zSuffix;
+    } aShadow[] = {
+        {p->vector_columns[i].index_type == VEC0_INDEX_TYPE_FLAT
+             ? p->shadowVectorChunksNames[i]
+             : NULL,
+         "vector_chunks"},
+#if SQLITE_VEC_ENABLE_RESCORE
+        {p->shadowRescoreChunksNames[i], "rescore_chunks"},
+        {p->shadowRescoreVectorsNames[i], "rescore_vectors"},
+#endif
+#if SQLITE_VEC_ENABLE_DISKANN
+        {p->shadowDiskannVectorsNames[i], "vectors"},
+        {p->shadowDiskannNodesNames[i], "diskann_nodes"},
+        {p->shadowDiskannBufferNames[i], "diskann_buffer"},
+#endif
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+        {p->shadowIvfCentroidsNames[i], "ivf_centroids"},
+        {p->shadowIvfCellsNames[i], "ivf_cells"},
+        {p->shadowIvfRowidMapNames[i], "ivf_rowid_map"},
+        {p->vector_columns[i].ivf.quantizer != VEC0_IVF_QUANTIZER_NONE
+             ? p->shadowIvfVectorsNames[i]
+             : NULL,
+         "ivf_vectors"},
+#endif
+    };
+    for (size_t j = 0; j < countof(aShadow); j++) {
+      if (!aShadow[j].zOld) {
+        continue;
+      }
+      zSql = sqlite3_mprintf(
+          "ALTER TABLE \"%w\".\"%w\" RENAME TO \"%w_%s%02d\"", p->schemaName,
+          aShadow[j].zOld, zName, aShadow[j].zSuffix, i);
+      if (!zSql) {
+        return SQLITE_NOMEM;
+      }
+      rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
+      sqlite3_free((void *)zSql);
+      if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+        rc = SQLITE_ERROR;
+        vtab_set_error(pVTab, "could not rename %s shadow table",
+                       aShadow[j].zSuffix);
+        goto done;
+      }
+      sqlite3_finalize(stmt);
     }
-    zSql = sqlite3_mprintf("ALTER TABLE \"%w\".\"%w\" RENAME TO \"%w\"",
-                           p->schemaName, p->shadowVectorChunksNames[i],
-                           newShadowVectorChunksName);
-    sqlite3_free(newShadowVectorChunksName);
-    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
-    sqlite3_free((void *)zSql);
-    if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
-      rc = SQLITE_ERROR;
-      vtab_set_error(pVTab, "could not rename vector_chunks shadow table");
-      goto done;
-    }
-    sqlite3_finalize(stmt);
   }
 
   if (p->numAuxiliaryColumns > 0) {
@@ -12912,8 +18608,28 @@ static sqlite3_module vec_static_blob_entriesModule = {
 #define SQLITE_VEC_DEBUG_BUILD_NEON ""
 #endif
 
+#if SQLITE_VEC_ENABLE_RESCORE
+#define SQLITE_VEC_DEBUG_BUILD_RESCORE "rescore"
+#else
+#define SQLITE_VEC_DEBUG_BUILD_RESCORE ""
+#endif
+
+#if SQLITE_VEC_EXPERIMENTAL_IVF_ENABLE
+#define SQLITE_VEC_DEBUG_BUILD_IVF "ivf"
+#else
+#define SQLITE_VEC_DEBUG_BUILD_IVF ""
+#endif
+
+#if SQLITE_VEC_ENABLE_DISKANN
+#define SQLITE_VEC_DEBUG_BUILD_DISKANN "diskann"
+#else
+#define SQLITE_VEC_DEBUG_BUILD_DISKANN ""
+#endif
+
 #define SQLITE_VEC_DEBUG_BUILD                                                 \
-  SQLITE_VEC_DEBUG_BUILD_AVX " " SQLITE_VEC_DEBUG_BUILD_NEON
+  SQLITE_VEC_DEBUG_BUILD_AVX                                                   \
+  " " SQLITE_VEC_DEBUG_BUILD_NEON " " SQLITE_VEC_DEBUG_BUILD_RESCORE           \
+  " " SQLITE_VEC_DEBUG_BUILD_IVF " " SQLITE_VEC_DEBUG_BUILD_DISKANN
 
 #define SQLITE_VEC_DEBUG_STRING                                                \
   "Version: " SQLITE_VEC_VERSION "\n"                                          \

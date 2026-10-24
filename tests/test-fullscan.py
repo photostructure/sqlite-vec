@@ -8,6 +8,29 @@ def _f32(values):
     return struct.pack(f"{len(values)}f", *values)
 
 
+def test_fullscan_reads_indexed_columns(db):
+    # Rescore and DiskANN columns keep their vectors outside _vector_chunks, so
+    # a scan reads them row by row, beside a flat column read by chunk.
+    db.execute(
+        "create virtual table v using vec0("
+        "flat float[8], "
+        "r float[8] indexed by rescore(quantizer=bit), "
+        "d float[8] indexed by diskann(neighbor_quantizer=binary), "
+        "chunk_size=8)"
+    )
+    for i in range(1, 21):
+        db.execute(
+            "insert into v(rowid, flat, r, d) values (?, ?, ?, ?)",
+            [i, _f32([i] * 8), _f32([-i] * 8), _f32([i, -i] * 4)],
+        )
+    rows = db.execute("select rowid, flat, r, d from v").fetchall()
+    assert len(rows) == 20
+    for rowid, flat, r, d in rows:
+        assert flat == _f32([rowid] * 8)
+        assert r == _f32([-rowid] * 8)
+        assert d == _f32([rowid, -rowid] * 4)
+
+
 def test_fullscan_reads_every_vector_across_chunks(db):
     # Two vector columns, so each keeps its own handle, over chunks with gaps.
     db.execute(
@@ -54,10 +77,10 @@ def test_fullscan_reads_a_chunk_rewritten_during_the_scan(db):
         assert rows[rowid] == (rowid, 0)
 
 
-def _scan_around(db, write):
+def _scan_around(db, column, write):
     # Fetches one row of a full scan, runs `write` on the same connection, then
     # fetches the rest.
-    db.execute("create virtual table v using vec0(a float[2], chunk_size=8)")
+    db.execute(f"create virtual table v using vec0({column}, chunk_size=8)")
     for i in range(1, 17):
         db.execute("insert into v(rowid, a) values (?, ?)", [i, _f32([i, 0])])
     db.execute("delete from v where rowid between 2 and 7")
@@ -67,18 +90,31 @@ def _scan_around(db, write):
     return {r[0]: struct.unpack("2f", r[1]) for r in head + scan.fetchall()}
 
 
-def test_fullscan_errors_on_a_row_deleted_during_the_scan(db):
+# A flat column is read by chunk, a rescore or DiskANN column row by row, and a
+# table whose only vector column is DiskANN keeps no chunks at all.
+SCANNED_COLUMNS = [
+    "a float[2]",
+    "a float[2] indexed by rescore(quantizer=int8)",
+    "a float[2] indexed by diskann(neighbor_quantizer=int8)",
+]
+
+
+@pytest.mark.parametrize("column", SCANNED_COLUMNS)
+def test_fullscan_errors_on_a_row_deleted_during_the_scan(db, column):
     def write():
         db.execute("delete from v where rowid = 12")
         db.execute("insert into v(rowid, a) values (99, ?)", [_f32([99, 99])])
 
     # Row 99 takes row 12's slot; the scan must not return its vector as row 12.
     with pytest.raises(sqlite3.OperationalError, match="rowid 12"):
-        _scan_around(db, write)
+        _scan_around(db, column, write)
 
 
-def test_fullscan_reads_rows_moved_by_optimize_during_the_scan(db):
-    rows = _scan_around(db, lambda: db.execute("insert into v(v) values ('optimize')"))
+@pytest.mark.parametrize("column", SCANNED_COLUMNS)
+def test_fullscan_reads_rows_moved_by_optimize_during_the_scan(db, column):
+    rows = _scan_around(
+        db, column, lambda: db.execute("insert into v(v) values ('optimize')")
+    )
     assert rows == {i: (i, 0) for i in [1, *range(8, 17)]}
 
 

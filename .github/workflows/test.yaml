@@ -67,6 +67,25 @@ jobs:
           path: dist/*
       # after the upload, so dist/test-unit stays out of the artifact
       - run: make test-unit
+  # The IVF index is compiled only on request, so the other builds skip its
+  # tests; this one compiles it in and runs every suite.
+  build-linux-x86_64-ivf:
+    needs: memory-gate
+    runs-on: ubuntu-latest
+    env:
+      CPPFLAGS: -DSQLITE_VEC_EXPERIMENTAL_IVF_ENABLE=1
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
+        with:
+          enable-cache: true
+      - run: ./scripts/vendor.sh
+      - run: make loadable static
+      - run: uv sync --locked --managed-python --directory tests
+      - run: make test-loadable python=./tests/.venv/bin/python
+      - run: make test-unit
   build-macos-x86_64-extension:
     runs-on: macos-15-intel
     steps:
