@@ -24,6 +24,9 @@ enum Vec0TokenType {
   TOKEN_TYPE_RBRACKET = 3,
   TOKEN_TYPE_PLUS = 4,
   TOKEN_TYPE_EQ = 5,
+  TOKEN_TYPE_LPAREN = 6,
+  TOKEN_TYPE_RPAREN = 7,
+  TOKEN_TYPE_COMMA = 8,
 };
 
 #define VEC0_TOKEN_RESULT_EOF   1
@@ -60,12 +63,40 @@ enum Vec0DistanceMetrics {
   VEC0_DISTANCE_METRIC_L1 = 3,
 };
 
+#ifndef SQLITE_VEC_ENABLE_RESCORE
+#define SQLITE_VEC_ENABLE_RESCORE 1
+#endif
+
+enum Vec0IndexType {
+  VEC0_INDEX_TYPE_FLAT = 1,
+#if SQLITE_VEC_ENABLE_RESCORE
+  VEC0_INDEX_TYPE_RESCORE = 2,
+#endif
+};
+
+#if SQLITE_VEC_ENABLE_RESCORE
+enum Vec0RescoreQuantizerType {
+  VEC0_RESCORE_QUANTIZER_BIT = 1,
+  VEC0_RESCORE_QUANTIZER_INT8 = 2,
+};
+
+struct Vec0RescoreConfig {
+  enum Vec0RescoreQuantizerType quantizer_type;
+  int oversample;
+  int oversample_search;
+};
+#endif
+
 struct VectorColumnDefinition {
   char *name;
   int name_length;
   size_t dimensions;
   enum VectorElementType element_type;
   enum Vec0DistanceMetrics distance_metric;
+  enum Vec0IndexType index_type;
+#if SQLITE_VEC_ENABLE_RESCORE
+  struct Vec0RescoreConfig rescore;
+#endif
 };
 
 int vec0_parse_vector_column(const char *source, int source_length,
@@ -76,5 +107,13 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
                                         char **out_column_name,
                                         int *out_column_name_length,
                                         int *out_column_type, bool isCreate);
+
+#if SQLITE_VEC_ENABLE_RESCORE
+size_t rescore_quantized_byte_size(struct VectorColumnDefinition *col);
+void rescore_quantize_float_to_bit(const float *src, uint8_t *dst,
+                                   size_t dimensions);
+void rescore_quantize_float_to_int8(const float *src, int8_t *dst,
+                                    size_t dimensions);
+#endif
 
 #endif /* SQLITE_VEC_INTERNAL_H */

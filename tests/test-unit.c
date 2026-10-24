@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <math.h>
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -106,6 +107,24 @@ void test_vec0_token_next() {
   assert(rc == VEC0_TOKEN_RESULT_SOME);
   assert(token.token_type == TOKEN_TYPE_DIGIT);
   assert(token.end - token.start == 2);
+
+  // Left paren
+  input = "(";
+  rc = vec0_token_next(input, input + 1, &token);
+  assert(rc == VEC0_TOKEN_RESULT_SOME);
+  assert(token.token_type == TOKEN_TYPE_LPAREN);
+
+  // Right paren
+  input = ")";
+  rc = vec0_token_next(input, input + 1, &token);
+  assert(rc == VEC0_TOKEN_RESULT_SOME);
+  assert(token.token_type == TOKEN_TYPE_RPAREN);
+
+  // Comma
+  input = ",";
+  rc = vec0_token_next(input, input + 1, &token);
+  assert(rc == VEC0_TOKEN_RESULT_SOME);
+  assert(token.token_type == TOKEN_TYPE_COMMA);
 
   printf("  All vec0_token_next tests passed.\n");
 }
@@ -385,6 +404,91 @@ void test_vec0_parse_vector_column() {
     assert(rc != SQLITE_OK);
   }
 
+  // indexed by flat()
+  {
+    const char *input = "emb float[768] indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.dimensions == 768);
+    sqlite3_free(col.name);
+  }
+
+  // indexed by flat() with distance_metric
+  {
+    const char *input =
+        "emb float[768] distance_metric=cosine indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
+    sqlite3_free(col.name);
+  }
+
+  // indexed by flat() on int8
+  {
+    const char *input = "emb int8[256] indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_INT8);
+    sqlite3_free(col.name);
+  }
+
+  // indexed by flat() on bit
+  {
+    const char *input = "emb bit[64] indexed by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    assert(col.element_type == SQLITE_VEC_ELEMENT_TYPE_BIT);
+    sqlite3_free(col.name);
+  }
+
+  // default index_type is FLAT
+  {
+    const char *input = "emb float[768]";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    sqlite3_free(col.name);
+  }
+
+  // Error: indexed by (missing type name)
+  {
+    const char *input = "emb float[768] indexed by";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: indexed by unknown()
+  {
+    const char *input = "emb float[768] indexed by unknown()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: indexed by flat (missing parens)
+  {
+    const char *input = "emb float[768] indexed by flat";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: indexed flat() (missing "by")
+  {
+    const char *input = "emb float[768] indexed flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: a prefix of a keyword, even when not strict
+  {
+    const char *input = "emb float[768] index by flat()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_ERROR);
+  }
+
   printf("  All vec0_parse_vector_column tests passed.\n");
 }
 
@@ -495,6 +599,234 @@ void test_vec0_fullscan_schema_rollback() {
   }
 }
 
+#if SQLITE_VEC_ENABLE_RESCORE
+
+void test_rescore_quantize_float_to_bit() {
+  printf("Starting %s...\n", __func__);
+  uint8_t dst[16];
+
+  // All positive -> all bits 1
+  {
+    float src[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+    memset(dst, 0, sizeof(dst));
+    rescore_quantize_float_to_bit(src, dst, 8);
+    assert(dst[0] == 0xFF);
+  }
+
+  // All negative -> all bits 0
+  {
+    float src[8] = {-1.0f, -2.0f, -3.0f, -4.0f, -5.0f, -6.0f, -7.0f, -8.0f};
+    memset(dst, 0xFF, sizeof(dst));
+    rescore_quantize_float_to_bit(src, dst, 8);
+    assert(dst[0] == 0x00);
+  }
+
+  // Alternating positive/negative
+  {
+    float src[8] = {1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f};
+    rescore_quantize_float_to_bit(src, dst, 8);
+    // bits 0,2,4,6 set => 0b01010101 = 0x55
+    assert(dst[0] == 0x55);
+  }
+
+  // Zero values -> bit is set (>= 0.0f)
+  {
+    float src[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    rescore_quantize_float_to_bit(src, dst, 8);
+    assert(dst[0] == 0xFF);
+  }
+
+  // 128 dimensions -> 16 bytes output
+  {
+    float src[128];
+    for (int i = 0; i < 128; i++)
+      src[i] = (i % 2 == 0) ? 1.0f : -1.0f;
+    memset(dst, 0, 16);
+    rescore_quantize_float_to_bit(src, dst, 128);
+    // Even indices set: bits 0,2,4,6 in each byte => 0x55
+    for (int i = 0; i < 16; i++) {
+      assert(dst[i] == 0x55);
+    }
+  }
+
+  printf("  All rescore_quantize_float_to_bit tests passed.\n");
+}
+
+void test_rescore_quantize_float_to_int8() {
+  printf("Starting %s...\n", __func__);
+  int8_t dst[16];
+
+  // [-1, 1] maps onto [-128, 127] in steps of 2/255, truncating toward zero.
+  // 1.0 lands just below 127 in float arithmetic, so it truncates to 126.
+  {
+    float src[6] = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 1.004f};
+    rescore_quantize_float_to_int8(src, dst, 6);
+    assert(dst[0] == -128);
+    assert(dst[1] == -64);
+    assert(dst[2] == 0);
+    assert(dst[3] == 63);
+    assert(dst[4] == 126);
+    assert(dst[5] == 127);
+  }
+
+  // Values outside [-1, 1] clamp, and NaN clamps to 127
+  {
+    float src[5] = {2.0f, -2.0f, INFINITY, -INFINITY, NAN};
+    rescore_quantize_float_to_int8(src, dst, 5);
+    assert(dst[0] == 127);
+    assert(dst[1] == -128);
+    assert(dst[2] == 127);
+    assert(dst[3] == -128);
+    assert(dst[4] == 127);
+  }
+
+  // The mapping never decreases
+  {
+    int8_t prev = -128;
+    for (int i = 0; i <= 2200; i++) {
+      float src = -1.1f + (float)i * 0.001f;
+      int8_t out;
+      rescore_quantize_float_to_int8(&src, &out, 1);
+      assert(out >= prev);
+      prev = out;
+    }
+  }
+
+  printf("  All rescore_quantize_float_to_int8 tests passed.\n");
+}
+
+void test_rescore_quantized_byte_size() {
+  printf("Starting %s...\n", __func__);
+  struct VectorColumnDefinition col;
+  memset(&col, 0, sizeof(col));
+
+  // Bit quantizer: dims/8
+  col.rescore.quantizer_type = VEC0_RESCORE_QUANTIZER_BIT;
+  col.dimensions = 128;
+  assert(rescore_quantized_byte_size(&col) == 16);
+  col.dimensions = 8;
+  assert(rescore_quantized_byte_size(&col) == 1);
+  col.dimensions = 1024;
+  assert(rescore_quantized_byte_size(&col) == 128);
+
+  // Int8 quantizer: dims
+  col.rescore.quantizer_type = VEC0_RESCORE_QUANTIZER_INT8;
+  col.dimensions = 128;
+  assert(rescore_quantized_byte_size(&col) == 128);
+  col.dimensions = 8;
+  assert(rescore_quantized_byte_size(&col) == 8);
+  col.dimensions = 1024;
+  assert(rescore_quantized_byte_size(&col) == 1024);
+
+  printf("  All rescore_quantized_byte_size tests passed.\n");
+}
+
+void test_vec0_parse_vector_column_rescore() {
+  printf("Starting %s...\n", __func__);
+  struct VectorColumnDefinition col;
+  int rc;
+
+  // Basic bit quantizer
+  {
+    const char *input = "emb float[128] indexed by rescore(quantizer=bit)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_RESCORE);
+    assert(col.rescore.quantizer_type == VEC0_RESCORE_QUANTIZER_BIT);
+    assert(col.rescore.oversample == 8); // default
+    assert(col.rescore.oversample_search == 0);
+    sqlite3_free(col.name);
+  }
+
+  // Int8 quantizer
+  {
+    const char *input = "emb float[128] indexed by rescore(quantizer=int8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_RESCORE);
+    assert(col.rescore.quantizer_type == VEC0_RESCORE_QUANTIZER_INT8);
+    sqlite3_free(col.name);
+  }
+
+  // Bit quantizer with oversample, in either order
+  {
+    const char *input =
+        "emb float[128] indexed by rescore(quantizer=bit, oversample=16)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_RESCORE);
+    assert(col.rescore.quantizer_type == VEC0_RESCORE_QUANTIZER_BIT);
+    assert(col.rescore.oversample == 16);
+    sqlite3_free(col.name);
+  }
+  {
+    const char *input =
+        "emb float[128] indexed by rescore(oversample=128, quantizer=int8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.rescore.quantizer_type == VEC0_RESCORE_QUANTIZER_INT8);
+    assert(col.rescore.oversample == 128);
+    sqlite3_free(col.name);
+  }
+
+  // With distance_metric=cosine
+  {
+    const char *input = "emb float[128] distance_metric=cosine indexed by "
+                        "rescore(quantizer=int8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_RESCORE);
+    assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
+    assert(col.rescore.quantizer_type == VEC0_RESCORE_QUANTIZER_INT8);
+    sqlite3_free(col.name);
+  }
+
+  const char *errors[] = {
+      // a non-float element type
+      "emb int8[128] indexed by rescore(quantizer=bit)",
+      "emb bit[128] indexed by rescore(quantizer=bit)",
+      // dimensions not divisible by 8 for the bit quantizer
+      "emb float[100] indexed by rescore(quantizer=bit)",
+      // no quantizer
+      "emb float[128] indexed by rescore(oversample=8)",
+      "emb float[128] indexed by rescore()",
+      "emb float[128] indexed by rescore",
+      // an unknown quantizer or option
+      "emb float[128] indexed by rescore(quantizer=float)",
+      "emb float[128] indexed by rescore(quantizer=bit, k=8)",
+      // oversample outside 1 to 128, or not an integer
+      "emb float[128] indexed by rescore(quantizer=bit, oversample=0)",
+      "emb float[128] indexed by rescore(quantizer=bit, oversample=129)",
+      "emb float[128] indexed by rescore(quantizer=bit, oversample=bit)",
+      // malformed options
+      "emb float[128] indexed by rescore(quantizer=bit",
+      "emb float[128] indexed by rescore(quantizer=bit,)",
+      "emb float[128] indexed by rescore(quantizer bit)",
+      "emb float[128] indexed by rescore(quantizer=bit oversample=8)",
+  };
+  for (size_t i = 0; i < countof(errors); i++) {
+    rc = vec0_parse_vector_column(errors[i], (int)strlen(errors[i]), &col,
+                                  true);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: a prefix of a keyword, even when not strict
+  {
+    const char *input = "emb float[128] indexed by rescor(quantizer=bit)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_ERROR);
+  }
+  {
+    const char *input = "emb float[128] indexed by rescore(quant=bit)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  printf("  All vec0_parse_vector_column_rescore tests passed.\n");
+}
+
+#endif /* SQLITE_VEC_ENABLE_RESCORE */
+
 int main() {
   printf("Starting unit tests...\n");
   test_vec0_token_next();
@@ -502,5 +834,11 @@ int main() {
   test_vec0_parse_vector_column();
   test_vec0_parse_partition_key_definition();
   test_vec0_fullscan_schema_rollback();
+#if SQLITE_VEC_ENABLE_RESCORE
+  test_rescore_quantize_float_to_bit();
+  test_rescore_quantize_float_to_int8();
+  test_rescore_quantized_byte_size();
+  test_vec0_parse_vector_column_rescore();
+#endif
   printf("All unit tests passed.\n");
 }

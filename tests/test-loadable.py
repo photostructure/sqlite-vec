@@ -2984,6 +2984,58 @@ def test_vec0_constructor():
         db.execute("create virtual table v using vec0(4)")
 
 
+def test_vec0_indexed_by_flat():
+    db.execute("drop table if exists t_ibf")
+    db.execute("drop table if exists t_ibf2")
+    db.execute("drop table if exists t_ibf3")
+    db.execute("drop table if exists t_ibf4")
+
+    # indexed by flat() should succeed and behave identically to no index clause
+    db.execute("create virtual table t_ibf using vec0(emb float[4] indexed by flat())")
+    db.execute(
+        "insert into t_ibf(rowid, emb) values (1, X'00000000000000000000000000000000')"
+    )
+    rows = db.execute(
+        "select rowid from t_ibf where emb match X'00000000000000000000000000000000' and k = 1"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == 1
+    db.execute("drop table t_ibf")
+
+    # indexed by flat() with distance_metric
+    db.execute(
+        "create virtual table t_ibf2 using vec0(emb float[4] distance_metric=cosine indexed by flat())"
+    )
+    db.execute("drop table t_ibf2")
+
+    # indexed by flat() on int8
+    db.execute("create virtual table t_ibf3 using vec0(emb int8[4] indexed by flat())")
+    db.execute("drop table t_ibf3")
+
+    # indexed by flat() on bit
+    db.execute("create virtual table t_ibf4 using vec0(emb bit[8] indexed by flat())")
+    db.execute("drop table t_ibf4")
+
+    # Error: unknown index type
+    with _raises(
+        "vec0 constructor error: could not parse vector column 'emb float[4] indexed by unknown()'",
+        sqlite3.DatabaseError,
+    ):
+        db.execute(
+            "create virtual table v using vec0(emb float[4] indexed by unknown())"
+        )
+
+    # Error: indexed by (missing type)
+    with _raises(
+        "vec0 constructor error: could not parse vector column 'emb float[4] indexed by'",
+        sqlite3.DatabaseError,
+    ):
+        db.execute("create virtual table v using vec0(emb float[4] indexed by)")
+
+    if db.in_transaction:
+        db.rollback()
+
+
 def test_vec0_create_errors():
     # EVIDENCE-OF: V17740_01811 vec0 create _chunks error handling
     db.set_authorizer(authorizer_deny_on(sqlite3.SQLITE_CREATE_TABLE, "t1_chunks"))
