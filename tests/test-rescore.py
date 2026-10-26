@@ -1083,3 +1083,33 @@ def test_drop_table_without_a_rescore_shadow_table(db, missing):
     db.execute("DROP TABLE t")
     names = db.execute("SELECT name FROM sqlite_master WHERE name LIKE 't%'").fetchall()
     assert names == []
+
+
+def test_shadow_rescore_tables(db):
+    # As in test_shadow_vector_chunks (test-general.py): after VACUUM, SQLite
+    # asks xShadowName about every backing table, and a name that only looks
+    # like a rescore table's stays an ordinary table.
+    db.execute(
+        "CREATE VIRTUAL TABLE v USING vec0("
+        "  a float[8] indexed by rescore(quantizer=bit), b float[1]"
+        ")"
+    )
+    db.execute("INSERT INTO v(rowid, a, b) VALUES (1, '[1,0,0,0,0,0,0,0]', '[1]')")
+    db.commit()
+    for name in ["v_rescore_chunks", "v_rescore_chunks0", "v_rescore_vectors000"]:
+        db.execute(f"CREATE TABLE {name}(x)")
+    db.execute("VACUUM")
+    types = {
+        row[0]: row[1]
+        for row in db.execute(
+            "SELECT name, type FROM pragma_table_list WHERE schema = 'main'"
+        )
+        if row[0].startswith("v_rescore")
+    }
+    assert types == {
+        "v_rescore_chunks00": "shadow",
+        "v_rescore_vectors00": "shadow",
+        "v_rescore_chunks": "table",
+        "v_rescore_chunks0": "table",
+        "v_rescore_vectors000": "table",
+    }

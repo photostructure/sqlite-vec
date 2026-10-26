@@ -1,7 +1,7 @@
 """ALTER TABLE ... RENAME on vec0 tables.
 
-Ported from asg017/sqlite-vec@c560710 and @8105eee, without the tests for
-upstream's DiskANN and IVF indexes, which this fork does not have.
+Ported from asg017/sqlite-vec@c560710, @8105eee and @8b81f40, without the tests
+for upstream's DiskANN and IVF indexes, which this fork does not have.
 """
 
 import sqlite3
