@@ -1030,3 +1030,19 @@ def test_insert_after_chunk_deleted_in_upstream_declared_table(db, quantizer):
     assert [tuple(r) for r in rows] == [(2, 0.0)]
     chunks = db.execute("SELECT _rowid_, rowid FROM t_rescore_chunks00").fetchall()
     assert [tuple(r) for r in chunks] == [(2, 2)]
+
+
+@pytest.mark.parametrize("missing", ["t_rescore_chunks00", "t_rescore_vectors00"])
+def test_drop_table_without_a_rescore_shadow_table(db, missing):
+    # Upstream drops the rescore shadow tables with IF EXISTS, so a table
+    # that lost one still drops, with the rest of its shadow tables.
+    db.execute(
+        "CREATE VIRTUAL TABLE t USING vec0("
+        "  embedding float[8] indexed by rescore(quantizer=bit)"
+        ")"
+    )
+    db.execute("INSERT INTO t(rowid, embedding) VALUES (1, '[1,0,0,0,0,0,0,0]')")
+    db.execute(f"DROP TABLE {missing}")
+    db.execute("DROP TABLE t")
+    names = db.execute("SELECT name FROM sqlite_master WHERE name LIKE 't%'").fetchall()
+    assert names == []

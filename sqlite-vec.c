@@ -6477,7 +6477,10 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
       if (!shadowNames[j]) {
         continue;
       }
-      zSql = sqlite3_mprintf("DROP TABLE \"%w\".\"%w\"", p->schemaName,
+      // As upstream does, a missing rescore shadow table (j > 0) does not
+      // keep the table from dropping.
+      zSql = sqlite3_mprintf("DROP TABLE %s\"%w\".\"%w\"",
+                             j > 0 ? "IF EXISTS " : "", p->schemaName,
                              shadowNames[j]);
       rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
       sqlite3_free((void *)zSql);
