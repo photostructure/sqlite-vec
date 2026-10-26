@@ -4791,6 +4791,13 @@ int vec0_result_id(vec0_vtab *p, sqlite3_context *context, i64 rowid) {
   }
   sqlite3_value *valueId;
   int rc = vec0_get_id_value_from_rowid(p, rowid, &valueId);
+  if (rc == SQLITE_EMPTY) {
+    // The row was deleted after the query found it. SQLite reserves
+    // SQLITE_EMPTY, so report an error, with the message
+    // vec0_get_vector_data() sets.
+    vtab_set_error(&p->base, "Could not find a row with rowid %lld", rowid);
+    return SQLITE_ERROR;
+  }
   if (rc != SQLITE_OK) {
     return rc;
   }
@@ -4916,6 +4923,11 @@ int vec0_get_partition_value_for_rowid(vec0_vtab *pVtab, i64 rowid,
   i64 chunk_id;
   i64 chunk_offset;
   rc = vec0_get_chunk_position(pVtab, rowid, NULL, &chunk_id, &chunk_offset);
+  if (rc == SQLITE_EMPTY) {
+    // The row was deleted after the query found it. SQLite reserves
+    // SQLITE_EMPTY.
+    return SQLITE_ERROR;
+  }
   if (rc != SQLITE_OK) {
     return rc;
   }
@@ -10888,7 +10900,9 @@ static int vec0Column_fullscan(vec0_vtab *pVtab, vec0_cursor *pCur,
                                         &v, &sz)
             : vec0_get_vector_data(pVtab, rowid, vector_idx, &v, &sz);
     if (rc != SQLITE_OK) {
-      return rc;
+      // SQLITE_EMPTY: the row was deleted after the scan found it, as
+      // vec0_fullscan_read_vector() reports with SQLITE_ERROR.
+      return rc == SQLITE_EMPTY ? SQLITE_ERROR : rc;
     }
     sqlite3_result_blob(context, v, sz, sqlite3_free);
     sqlite3_result_subtype(context,
@@ -11060,7 +11074,9 @@ static int vec0Column_knn(vec0_vtab *pVtab, vec0_cursor *pCur,
         pVtab, pCur->knn_data->rowids[pCur->knn_data->current_idx], vector_idx,
         &out, &sz);
     if (rc != SQLITE_OK) {
-      return rc;
+      // SQLITE_EMPTY: the row was deleted after the query found it. SQLite
+      // reserves that code, so report the error vec0_get_vector_data() set.
+      return rc == SQLITE_EMPTY ? SQLITE_ERROR : rc;
     }
     sqlite3_result_blob(context, out, sz, sqlite3_free);
     sqlite3_result_subtype(context,

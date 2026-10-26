@@ -1,7 +1,9 @@
 import random
+import sqlite3
 import struct
 
 import numpy as np
+import pytest
 
 from conftest import get_extension_path
 
@@ -116,3 +118,22 @@ def test_knn_ranks_a_stored_nan_distance_last_across_chunks(db):
     # The NaN, in the second chunk, ranks after the first chunk's rows too.
     assert knn(16) == [15, 14, 13, 12, 11, 10, 9, 1, 2, 3, 4, 5, 6, 7, 8, 16]
     assert knn(9) == [15, 14, 13, 12, 11, 10, 9, 1, 2]
+
+
+@pytest.mark.parametrize(
+    "column", ["a float[2]", "a float[2] indexed by rescore(quantizer=int8)"]
+)
+def test_knn_errors_on_a_row_deleted_while_reading(db, column):
+    # The KNN found row 14, then the same connection deleted it before the
+    # query read its vector.
+    db.execute(f"create virtual table v using vec0({column}, chunk_size=8)")
+    for i in range(1, 17):
+        db.execute("insert into v(rowid, a) values (?, ?)", [i, _f32([i, 0])])
+    knn = db.execute(
+        "select rowid, a from v where a match ? and k = 3", [_f32([16, 0])]
+    )
+    assert knn.fetchone()[0] == 16
+    db.execute("delete from v where rowid = 14")
+    with pytest.raises(sqlite3.OperationalError, match="rowid 14") as excinfo:
+        knn.fetchall()
+    assert excinfo.value.sqlite_errorname == "SQLITE_ERROR"

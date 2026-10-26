@@ -99,8 +99,9 @@ def test_fullscan_errors_on_a_row_deleted_during_the_scan(db, column):
         db.execute("insert into v(rowid, a) values (99, ?)", [_f32([99, 99])])
 
     # Row 99 takes row 12's slot; the scan must not return its vector as row 12.
-    with pytest.raises(sqlite3.OperationalError, match="rowid 12"):
+    with pytest.raises(sqlite3.OperationalError, match="rowid 12") as excinfo:
         _scan_around(db, column, write)
+    assert excinfo.value.sqlite_errorname == "SQLITE_ERROR"
 
 
 @pytest.mark.parametrize("column", SCANNED_COLUMNS)
@@ -148,3 +149,45 @@ def test_fullscan_keeps_an_interrupt_raised_while_moving_to_the_next_chunk(db):
 
         with pytest.raises(sqlite3.OperationalError, match="interrupted"):
             finish_scan(cancel_at_n)
+
+
+@pytest.mark.parametrize("query", ["scan", "knn"])
+@pytest.mark.parametrize(
+    "declaration, select",
+    [
+        ("id text primary key, a float[2]", "id, a"),
+        ("id text primary key, a float[2] indexed by rescore(quantizer=int8)", "id, a"),
+        ("p integer partition key, a float[2]", "p, a"),
+    ],
+)
+def test_reading_the_id_or_partition_key_of_a_row_deleted_mid_read(
+    db, declaration, select, query
+):
+    # The query found the row, then the same connection deleted it before the
+    # query read its id or partition key, the first column selected. Python
+    # reads one row ahead, so the deleted row is a few rows past the first.
+    db.execute(f"create virtual table v using vec0({declaration}, chunk_size=8)")
+    text_id = declaration.startswith("id")
+    for i in range(1, 17):
+        if text_id:
+            db.execute("insert into v(id, a) values (?, ?)", [f"r{i}", _f32([i, 0])])
+        else:
+            db.execute("insert into v(rowid, p, a) values (?, 1, ?)", [i, _f32([i, 0])])
+    if query == "scan":
+        cursor = db.execute(f"select {select} from v")
+        deleted = 5
+    else:
+        partition = "" if text_id else " and p = 1"
+        cursor = db.execute(
+            f"select {select} from v where a match ? and k = 5{partition}",
+            [_f32([16, 0])],
+        )
+        deleted = 13
+    cursor.fetchone()
+    if text_id:
+        db.execute("delete from v where id = ?", [f"r{deleted}"])
+    else:
+        db.execute("delete from v where rowid = ?", [deleted])
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        cursor.fetchall()
+    assert excinfo.value.sqlite_errorname == "SQLITE_ERROR"

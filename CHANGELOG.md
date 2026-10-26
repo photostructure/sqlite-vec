@@ -18,6 +18,7 @@
 - A `DELETE` that removes the last row of a chunk now deletes the chunk's rows from the `_chunks`, `_vector_chunksNN`, and `_metadatachunksNN` shadow tables, so their pages are free for reuse without `optimize`; the emptied chunk used to stay until `optimize` removed it. Ported from [asg017@cb147c8](https://github.com/asg017/sqlite-vec/commit/cb147c8) via [vlasky@3a64182](https://github.com/vlasky/sqlite-vec/commit/3a64182) ([asg017#268](https://github.com/asg017/sqlite-vec/pull/268)).
 - A `DELETE` of a row whose bit in its chunk's validity bitmap is clear now fails with `vec0 deletion error: validity bit is not set`; it used to delete the row when a later row in the same byte of the bitmap was set. Only a damaged `_chunks` table has such a row.
 - A command that a `vec0` table does not know, as in `insert into t(t) values ('compact')`, now fails with `unknown vec0 command: 'compact'` instead of `SQL logic error`, as upstream [asg017@6e2c4c6](https://github.com/asg017/sqlite-vec/commit/6e2c4c6) does.
+- When the same connection deletes a row that a running full scan or KNN query has found but not yet read, reading that row's vector in a KNN query, or its `text` primary key or partition key in either query, now fails with `SQLITE_ERROR` instead of `SQLITE_EMPTY`, a code SQLite reserves for its own use. The primary key read fails with `Could not find a row with rowid N` and the partition key read with `SQL logic error`; both used to fail with `unknown error`.
 
 ### Fixed
 
