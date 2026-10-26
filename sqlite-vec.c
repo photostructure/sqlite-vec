@@ -9521,8 +9521,9 @@ void rescore_quantize_float_to_bit(const float *src, uint8_t *dst,
   }
 }
 
-// Maps [-1, 1] onto [-128, 127] in steps of 2/255, truncating toward zero, and
-// clamps values outside it, NaN to 127.
+// Maps v to (v + 1) / (2/255) - 128, truncated toward zero: -1 to -128, 0 to 0,
+// and 1, which float32 rounding puts just below 127, to 126. Results outside
+// [-128, 127] are clamped, and NaN becomes 127.
 void rescore_quantize_float_to_int8(const float *src, int8_t *dst,
                                     size_t dimensions) {
   float step = 2.0f / 255.0f;
@@ -9548,8 +9549,10 @@ static int rescore_new_chunk(vec0_vtab *p, i64 chunk_rowid) {
     size_t quantized_size = rescore_quantized_byte_size(&p->vector_columns[i]);
     i64 blob_size = (i64)p->chunk_size * (i64)quantized_size;
 
+    // Upstream declares _rescore_chunksNN with "rowid PRIMARY KEY"; see
+    // SHADOW_TABLE_ROWID_QUIRK in vec0_new_chunk() for why both are set.
     char *zSql = sqlite3_mprintf(
-        "INSERT INTO \"%w\".\"%w\"(rowid, vectors) VALUES (?, ?)",
+        "INSERT INTO \"%w\".\"%w\"(_rowid_, rowid, vectors) VALUES (?, ?, ?)",
         p->schemaName, p->shadowRescoreChunksNames[i]);
     if (!zSql) {
       return SQLITE_NOMEM;
@@ -9562,7 +9565,8 @@ static int rescore_new_chunk(vec0_vtab *p, i64 chunk_rowid) {
       return rc;
     }
     sqlite3_bind_int64(stmt, 1, chunk_rowid);
-    sqlite3_bind_zeroblob64(stmt, 2, blob_size);
+    sqlite3_bind_int64(stmt, 2, chunk_rowid);
+    sqlite3_bind_zeroblob64(stmt, 3, blob_size);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) {

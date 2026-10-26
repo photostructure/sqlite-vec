@@ -1002,3 +1002,31 @@ def test_runtime_oversample_rejects_trailing_text(db):
 
 def test_vec_debug_build_flags(db):
     assert "rescore" in db.execute("SELECT vec_debug()").fetchone()[0]
+
+
+@pytest.mark.parametrize("quantizer", ["bit", "int8"])
+def test_insert_after_chunk_deleted_in_upstream_declared_table(db, quantizer):
+    # Upstream declares _rescore_chunksNN with "rowid PRIMARY KEY", which is
+    # not an alias for _rowid_. Once its only chunk is empty, DELETE deletes
+    # it, so the next insert creates chunk 2, whose _rowid_ would otherwise be
+    # 1.
+    db.execute(
+        "CREATE VIRTUAL TABLE t USING vec0("
+        f"  embedding float[8] indexed by rescore(quantizer={quantizer}),"
+        "  chunk_size=8"
+        ")"
+    )
+    db.execute("DROP TABLE t_rescore_chunks00")
+    db.execute(
+        "CREATE TABLE t_rescore_chunks00(rowid PRIMARY KEY, vectors BLOB NOT NULL)"
+    )
+    db.execute("INSERT INTO t(rowid, embedding) VALUES (1, '[1,0,0,0,0,0,0,0]')")
+    db.execute("DELETE FROM t WHERE rowid = 1")
+    db.execute("INSERT INTO t(rowid, embedding) VALUES (2, '[0,1,0,0,0,0,0,0]')")
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE embedding MATCH '[0,1,0,0,0,0,0,0]'"
+        " AND k = 1"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [(2, 0.0)]
+    chunks = db.execute("SELECT _rowid_, rowid FROM t_rescore_chunks00").fetchall()
+    assert [tuple(r) for r in chunks] == [(2, 2)]
