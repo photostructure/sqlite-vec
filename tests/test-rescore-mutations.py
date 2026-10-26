@@ -12,14 +12,8 @@ def float_vec(values):
     return struct.pack(f"{len(values)}f", *values)
 
 
-def unpack_float_vec(blob):
-    """Unpack a float vector blob."""
-    n = len(blob) // 4
-    return list(struct.unpack(f"{n}f", blob))
-
-
 # ============================================================================
-# Error cases: rescore + aux/metadata/partition
+# CREATE with auxiliary, metadata and partition key columns
 # ============================================================================
 
 
@@ -85,7 +79,7 @@ def test_insert_single_verify_knn(db):
 
 
 def test_insert_large_batch(db):
-    """Insert 200+ rows (multiple chunks with default chunk_size=1024) and verify count and KNN."""
+    """Insert 200 rows, which fit in one chunk of the default 1024, and verify count and KNN."""
     dim = 16
     n = 200
     random.seed(99)
@@ -364,16 +358,16 @@ def test_single_dimension(db):
     # int8 quantizer (bit needs dim divisible by 8)
     db.execute(
         "CREATE VIRTUAL TABLE t USING vec0("
-        "  embedding float[8] indexed by rescore(quantizer=int8)"
+        "  embedding float[1] indexed by rescore(quantizer=int8)"
         ")"
     )
-    db.execute("INSERT INTO t(rowid, embedding) VALUES (1, ?)", [float_vec([1.0] * 8)])
-    db.execute("INSERT INTO t(rowid, embedding) VALUES (2, ?)", [float_vec([5.0] * 8)])
+    db.execute("INSERT INTO t(rowid, embedding) VALUES (1, ?)", [float_vec([1.0])])
+    db.execute("INSERT INTO t(rowid, embedding) VALUES (2, ?)", [float_vec([5.0])])
     rows = db.execute(
-        "SELECT rowid FROM t WHERE embedding MATCH ? ORDER BY distance LIMIT 1",
-        [float_vec([1.0] * 8)],
+        "SELECT rowid, distance FROM t WHERE embedding MATCH ? AND k = 2",
+        [float_vec([1.0])],
     ).fetchall()
-    assert rows[0]["rowid"] == 1
+    assert [(r["rowid"], r["distance"]) for r in rows] == [(1, 0.0), (2, 4.0)]
 
 
 # ============================================================================
@@ -393,7 +387,11 @@ def test_vec_debug_contains_rescore(db):
 
 
 def test_insert_batch_recall(db):
-    """Insert 150 rows and verify KNN recall is reasonable (>0.6)."""
+    """Insert 150 rows and verify KNN recall is reasonable (>0.6).
+
+    k * oversample = 40 of the 150 rows are candidates, so the int8 scan
+    decides which rows the float32 vectors rank.
+    """
     dim = 16
     n = 150
     k = 10
@@ -401,7 +399,7 @@ def test_insert_batch_recall(db):
 
     db.execute(
         f"CREATE VIRTUAL TABLE t_rescore USING vec0("
-        f"  embedding float[{dim}] indexed by rescore(quantizer=int8, oversample=16)"
+        f"  embedding float[{dim}] indexed by rescore(quantizer=int8, oversample=4)"
         f")"
     )
     db.execute(f"CREATE VIRTUAL TABLE t_flat USING vec0(embedding float[{dim}])")
@@ -432,7 +430,7 @@ def test_insert_batch_recall(db):
 
 
 # ============================================================================
-# Distance metric variants
+# Deletes checked by KNN
 # ============================================================================
 
 
@@ -494,10 +492,8 @@ def test_delete_with_rowid_in_constraint(db):
         "SELECT rowid FROM t WHERE embedding MATCH ? AND k = 5 AND rowid IN (1, 2, 3, 4, 5)",
         [float_vec([1.0] * 8)],
     ).fetchall()
-    returned = {r["rowid"] for r in rows}
-    assert 3 not in returned
-    assert 5 not in returned
-    assert returned.issubset({1, 2, 4})
+    # distances 0, sqrt(8) and sqrt(72), so the order is fixed
+    assert [r["rowid"] for r in rows] == [1, 2, 4]
 
 
 def test_delete_all_then_reinsert_batch(db):
@@ -531,9 +527,13 @@ def test_delete_all_then_reinsert_batch(db):
         "SELECT rowid FROM t WHERE embedding MATCH ? ORDER BY distance LIMIT 5",
         [float_vec([0.0] * 8)],
     ).fetchall()
-    returned = {r["rowid"] for r in rows}
-    # All returned rowids should be from the second batch
-    assert returned.issubset(set(range(100, 110)))
+    # the five nearest of the second batch, in order
+    assert [r["rowid"] for r in rows] == [100, 101, 102, 103, 104]
+
+
+# ============================================================================
+# Distance metric variants
+# ============================================================================
 
 
 def test_knn_int8_cosine(db):
@@ -561,3 +561,6 @@ def test_knn_int8_cosine(db):
     ).fetchall()
     assert rows[0]["rowid"] == 1
     assert rows[0]["distance"] < 0.01
+    # row 3's cosine distance, 1 - 1/sqrt(1.01); its L2 distance would be 0.1
+    assert rows[1]["rowid"] == 3
+    assert rows[1]["distance"] == pytest.approx(1 - 1 / math.sqrt(1.01), abs=1e-4)
