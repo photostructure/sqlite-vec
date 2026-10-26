@@ -362,7 +362,9 @@ result in precision loss for very small distance differences.
 
 **Note on pagination:** When multiple vectors have identical distances, pagination using
 `distance > X` may skip some results. For stable pagination, combine distance with rowid:
-`WHERE (distance > 0.5) OR (distance = 0.5 AND rowid > 123)`
+`WHERE (distance > 0.5) OR (distance = 0.5 AND rowid > 123)`. On a column indexed by
+`rescore()`, distance constraints filter only the `k * oversample` candidates (five times
+that with MMR, at most 4096), so paging with `distance > X` reaches at most that many rows.
 
 #### `VEC0_IDXSTR_KIND_KNN_MMR_LAMBDA` (`'#'`)
 

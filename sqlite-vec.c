@@ -2816,8 +2816,8 @@ enum Vec0IndexType {
 #if SQLITE_VEC_ENABLE_RESCORE
 // `indexed by rescore(quantizer=bit|int8, oversample=N)` keeps a quantized copy
 // of each float32 vector in chunks for the KNN scan, which finds k * oversample
-// candidates, and the vectors themselves by rowid to rank the candidates by
-// their exact distances.
+// (at most 4096) candidates, and the vectors themselves by rowid to rank the
+// candidates by their exact distances.
 // https://github.com/asg017/sqlite-vec/commit/ba0db0b
 enum Vec0RescoreQuantizerType {
   VEC0_RESCORE_QUANTIZER_BIT = 1,
@@ -9765,10 +9765,10 @@ static int rescore_delete_chunk(vec0_vtab *p, i64 chunk_id) {
 
 /**
  * The KNN of a column indexed by rescore(). It scans the quantized vectors of
- * the chunks stmtChunks returns for the k * oversample rows nearest the
- * quantized query vector, ranks those candidates by the distance of their
- * float32 vectors to the query vector, and returns the k nearest that meet the
- * query's distance constraints. Takes and returns what
+ * the chunks stmtChunks returns for the k * oversample (at most 4096) rows
+ * nearest the quantized query vector, ranks those candidates by the distance of
+ * their float32 vectors to the query vector, and returns the k nearest that
+ * meet the query's distance constraints. Takes and returns what
  * vec0Filter_knn_chunks_iter() does.
  *
  * Distance constraints apply to the float32 distances of the candidates, as in
@@ -9824,7 +9824,8 @@ static int rescore_knn(vec0_vtab *p, sqlite3_stmt *stmtChunks,
     break;
   }
 
-  // Phase 1: scan the quantized chunks for the k * oversample nearest rows
+  // Phase 1: scan the quantized chunks for the k * oversample (at most 4096)
+  // nearest rows
   cand_rowids = sqlite3_malloc(k_oversample * sizeof(i64));
   cand_distances = sqlite3_malloc(k_oversample * sizeof(f32));
   tmp_rowids = sqlite3_malloc(k_oversample * sizeof(i64));

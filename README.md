@@ -314,9 +314,10 @@ INSERT INTO emb_vectors(emb_vectors) VALUES('optimize');
 A `float` vector column declared `indexed by rescore(quantizer=bit)` or
 `indexed by rescore(quantizer=int8)` also keeps each vector quantized, to 1 bit
 or 8 bits per dimension. A KNN query scans the quantized vectors for the
-`k * oversample` nearest rows, then ranks those candidates by the distances of
-their `float` vectors. The distances it returns are exact, and its rows are
-those of an exact search whenever the nearest rows are among the candidates:
+`k * oversample` nearest rows (`5 * k * oversample` with `mmr_lambda` below 1,
+at most 4096), then ranks those candidates by the distances of their `float`
+vectors. The distances it returns are exact, and its rows are those of an exact
+search whenever the nearest rows are among the candidates:
 
 ```sql
 create virtual table vec_rescore using vec0(
@@ -342,11 +343,12 @@ where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
 
 `oversample` is 8 unless the column sets it, as in
 `indexed by rescore(quantizer=bit, oversample=16)`, from 1 to 128. The
-`oversample=N` command sets it for every rescore column, for the queries of the
-connection that runs it, until SQLite reconnects the table, as after `VACUUM`,
-`ALTER TABLE ... RENAME`, or another connection's schema change. With an
-oversample of 1, the query above keeps only the 3 rows nearest by bit distance,
-and row 11 is not among them:
+`oversample=N` command sets it for every rescore column of the table it runs
+on, for the queries of the connection that runs it, until SQLite reconnects the
+table, as after `VACUUM`, `ALTER TABLE ... RENAME`, or another connection's
+schema change. With an oversample of 1, the query above keeps 3 candidates: rows
+5 and 13, at bit distance 1, and row 16, which the scan keeps of the five rows
+tied at bit distance 3, so row 11 is not among them:
 
 ```sql
 insert into vec_rescore(vec_rescore) values ('oversample=1');
@@ -367,12 +369,14 @@ where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
 ```
 
 - `quantizer=bit` sets one bit for each value >= 0, and needs a number of
-  dimensions divisible by 8. `quantizer=int8` maps [-1, 1] onto the 256 values
-  of an int8, so it suits vectors whose values lie in that range, such as
-  normalized embeddings.
-- Distance constraints apply to the exact distances of the candidates, so a
-  query with `distance > x`, as in cursor-based pagination, returns fewer than
-  `k` rows when most of the candidates are nearer than `x`.
+  dimensions divisible by 8. `quantizer=int8` maps [-1, 1] onto int8 values, -1
+  to -128 and 1 to 126, and clamps its results to [-128, 127], so it suits
+  vectors whose values lie in [-1, 1], such as normalized embeddings.
+- Distance constraints apply only to the candidates, by their exact distances.
+  A query with `distance > x`, as in cursor-based pagination, returns fewer
+  than `k` rows once fewer than `k` candidates are farther than `x`, so paging
+  that way reaches at most as many rows as there are candidates, not every
+  row.
 - A table with a rescore column cannot have metadata or partition key columns.
   Auxiliary columns work.
 - `indexed by flat()` declares the exhaustive search that a column without the
