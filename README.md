@@ -343,8 +343,10 @@ where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
 `oversample` is 8 unless the column sets it, as in
 `indexed by rescore(quantizer=bit, oversample=16)`, from 1 to 128. The
 `oversample=N` command sets it for every rescore column, for the queries of the
-connection that runs it. With an oversample of 1, the query above keeps only the
-3 rows nearest by bit distance, and row 11 is not among them:
+connection that runs it, until SQLite reconnects the table, as after `VACUUM`,
+`ALTER TABLE ... RENAME`, or another connection's schema change. With an
+oversample of 1, the query above keeps only the 3 rows nearest by bit distance,
+and row 11 is not among them:
 
 ```sql
 insert into vec_rescore(vec_rescore) values ('oversample=1');

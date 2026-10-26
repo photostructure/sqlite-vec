@@ -642,6 +642,34 @@ def test_rescore_text_pk_insert_knn_delete(db):
     assert len(rows) >= 1  # other results still returned
 
 
+def test_runtime_oversample_changes_candidates(db):
+    # Row 1 has the query's signs but is far from it; row 2 is nearest but
+    # differs in one sign. With an oversample of 1, k = 1 keeps only row 1 as a
+    # candidate.
+    db.execute(
+        "CREATE VIRTUAL TABLE t USING vec0("
+        "  embedding float[8] indexed by rescore(quantizer=bit)"
+        ")"
+    )
+    db.execute(
+        "INSERT INTO t(rowid, embedding) VALUES (1, ?), (2, ?)",
+        [float_vec([0.01] * 8), float_vec([1.0] * 7 + [-0.01])],
+    )
+
+    def knn():
+        rows = db.execute(
+            "SELECT rowid FROM t WHERE embedding MATCH ? AND k = 1",
+            [float_vec([1.0] * 8)],
+        )
+        return [r[0] for r in rows]
+
+    assert knn() == [2]
+    db.execute("INSERT INTO t(t) VALUES ('oversample=1')")
+    assert knn() == [1]
+    db.execute("INSERT INTO t(t) VALUES ('oversample=8')")
+    assert knn() == [2]
+
+
 def test_runtime_oversample(db):
     """oversample can be changed at query time via FTS5-style command."""
     db.execute(
@@ -694,10 +722,16 @@ def test_runtime_oversample_error(db):
         "  embedding float[128] indexed by rescore(quantizer=bit)"
         ")"
     )
-    with pytest.raises(sqlite3.OperationalError, match="oversample must be >= 1"):
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="oversample must be a whole number from 1 to 2147483647",
+    ):
         db.execute("INSERT INTO t(t) VALUES ('oversample=0')")
 
-    with pytest.raises(sqlite3.OperationalError, match="oversample must be >= 1"):
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="oversample must be a whole number from 1 to 2147483647",
+    ):
         db.execute("INSERT INTO t(t) VALUES ('oversample=-5')")
 
 
@@ -995,7 +1029,10 @@ def test_runtime_oversample_rejects_trailing_text(db):
         ")"
     )
     for command in ["oversample=8x", "oversample=", "oversample= 8", "oversample=+8"]:
-        with pytest.raises(sqlite3.OperationalError, match="oversample must be >= 1"):
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="oversample must be a whole number from 1 to 2147483647",
+        ):
             db.execute("INSERT INTO t(t) VALUES (?)", [command])
     db.execute("INSERT INTO t(t) VALUES ('oversample=200')")
 

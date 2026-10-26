@@ -10129,8 +10129,10 @@ cleanup:
 
 /**
  * The command `oversample=N` sets the oversample of every column indexed by
- * rescore() for the KNN queries of this connection, in place of the one its
- * CREATE gave. Returns SQLITE_EMPTY for any other command.
+ * rescore() for this connection's KNN queries, in place of the one its CREATE
+ * gave, until SQLite reconnects the table, as after VACUUM, ALTER TABLE ...
+ * RENAME, or another connection's schema change. Returns SQLITE_EMPTY for any
+ * other command.
  */
 static int rescore_handle_command(vec0_vtab *p, const char *command) {
   static const char zKey[] = "oversample=";
@@ -10143,7 +10145,8 @@ static int rescore_handle_command(vec0_vtab *p, const char *command) {
   long oversample = strtol(zValue, &zEnd, 10);
   if (!(*zValue >= '0' && *zValue <= '9') || *zEnd != '\0' || errno == ERANGE ||
       oversample < 1 || oversample > INT_MAX) {
-    vtab_set_error(&p->base, "oversample must be >= 1");
+    vtab_set_error(&p->base, "oversample must be a whole number from 1 to %d",
+                   INT_MAX);
     return SQLITE_ERROR;
   }
   for (int i = 0; i < p->numVectorColumns; i++) {
