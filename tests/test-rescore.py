@@ -336,7 +336,7 @@ def test_knn_returns_float_distances(db):
 
 
 def test_knn_recall(db):
-    """With enough vectors, rescore should achieve good recall (>0.9)."""
+    """With enough vectors, rescore should achieve good recall (>= 0.7)."""
     dim = 32
     n = 1000
     k = 10
@@ -446,8 +446,8 @@ def test_knn_with_rowid_in(db):
         "SELECT rowid FROM t WHERE embedding MATCH ? AND rowid IN (1, 3, 5) ORDER BY distance LIMIT 3",
         [float_vec([0.0] * 8)],
     ).fetchall()
-    result_ids = {r["rowid"] for r in rows}
-    assert result_ids <= {1, 3, 5}
+    # distances 0, sqrt(32) and sqrt(128), so the order is fixed
+    assert [r["rowid"] for r in rows] == [1, 3, 5]
 
 
 def test_knn_after_deletes(db):
@@ -556,7 +556,7 @@ def test_multiple_vector_columns(db):
 
 
 def test_corrupt_zeroblob_validity(db):
-    """KNN should error (not crash) when rescore chunk rowids blob is zeroed out."""
+    """KNN should error (not crash) when the chunk's rowids blob has the wrong size."""
     db.execute(
         "CREATE VIRTUAL TABLE t USING vec0("
         "  embedding float[8] indexed by rescore(quantizer=bit)"
@@ -806,6 +806,97 @@ def test_knn_distance_constraint_lt_gt(db):
 # ============================================================================
 
 
+def _flat_and_rescore(db, column, rescore, rows):
+    """Creates f (flat) and r (rescore) tables with the same rows."""
+    db.execute(f"CREATE VIRTUAL TABLE f USING vec0({column})")
+    db.execute(f"CREATE VIRTUAL TABLE r USING vec0({column} indexed by {rescore})")
+    for rowid, v in rows.items():
+        for t in ["f", "r"]:
+            db.execute(
+                f"INSERT INTO {t}(rowid, embedding) VALUES (?, ?)",
+                [rowid, float_vec(v)],
+            )
+
+
+def _knn(db, table, query, where="", k=1):
+    rows = db.execute(
+        f"SELECT rowid, distance FROM {table} WHERE embedding MATCH ? AND k = ?"
+        f"{where} ORDER BY distance",
+        [float_vec(query), k],
+    )
+    return [(r[0], r[1]) for r in rows]
+
+
+@pytest.mark.parametrize("quantizer", ["bit", "int8"])
+def test_knn_cosine_ranks_by_cosine_distance(db, quantizer):
+    # Row 1 points the query's way at twice its length: cosine distance 0, L2
+    # distance 1. Row 2 is 0.25 off to the side: cosine distance about 0.0299,
+    # L2 distance 0.25. Both rows are candidates.
+    _flat_and_rescore(
+        db,
+        "embedding float[8] distance_metric=cosine",
+        f"rescore(quantizer={quantizer})",
+        {1: [2.0] + [0.0] * 7, 2: [1.0, 0.25] + [0.0] * 6},
+    )
+    query = [1.0] + [0.0] * 7
+    rescore = _knn(db, "r", query, k=2)
+    assert [r[0] for r in rescore] == [1, 2]
+    assert rescore == _knn(db, "f", query, k=2)
+    assert rescore[1][1] == pytest.approx(0.0298575, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    "metric, rows, query, nearest",
+    [
+        # by cosine row 1 is nearest; by L2 between the int8 vectors, row 2
+        (
+            "cosine",
+            {1: [0.2] + [0.0] * 7, 2: [1.0, 0.4] + [0.0] * 6},
+            [1.0] + [0.0] * 7,
+            1,
+        ),
+        # by L1 row 2 is nearest; by L2 between the int8 vectors, row 1
+        ("l1", {1: [0.5, 0.5] + [0.0] * 6, 2: [0.8] + [0.0] * 7}, [0.0] * 8, 2),
+    ],
+)
+def test_int8_candidates_follow_the_column_metric(db, metric, rows, query, nearest):
+    # With an oversample of 1 and k = 1, the int8 distance alone picks the one
+    # candidate, so it must be the column's metric.
+    _flat_and_rescore(
+        db,
+        f"embedding float[8] distance_metric={metric}",
+        "rescore(quantizer=int8, oversample=1)",
+        rows,
+    )
+    assert [r[0] for r in _knn(db, "r", query)] == [nearest]
+    assert [r[0] for r in _knn(db, "f", query)] == [nearest]
+
+
+@pytest.mark.parametrize(
+    "constraint, expected",
+    [
+        ("distance < 4", [1, 2, 3]),
+        ("distance <= 4", [1, 2, 3, 4]),
+        ("distance > 4", [5, 6, 7, 8]),
+        ("distance >= 4", [4, 5, 6, 7]),
+    ],
+)
+def test_knn_distance_constraints_match_a_flat_column(db, constraint, expected):
+    # Row i is at distance i from the query, exactly, and every row is a
+    # candidate (k * 8 >= 10). The constraint applies before the k nearest are
+    # chosen, so a page past the bound is still full.
+    _flat_and_rescore(
+        db,
+        "embedding float[8]",
+        "rescore(quantizer=bit)",
+        {i: [float(i)] + [0.0] * 7 for i in range(1, 11)},
+    )
+    query = [0.0] * 8
+    rescore = _knn(db, "r", query, f" AND {constraint}", k=4)
+    assert [r[0] for r in rescore] == expected
+    assert rescore == _knn(db, "f", query, f" AND {constraint}", k=4)
+
+
 def _rescore_table(db, quantizer, n=40, dim=16, chunk_size=8, seed=11):
     db.execute(
         "CREATE VIRTUAL TABLE t USING vec0("
@@ -1018,8 +1109,10 @@ def test_knn_mmr(db):
         "SELECT rowid FROM t WHERE embedding MATCH ? AND k = 3 AND mmr_lambda = 0.1",
         [query],
     ).fetchall()
-    assert [r[0] for r in diverse][0] == 1
-    assert {r[0] for r in diverse} != {1, 2, 3}
+    # as a flat column of the same vectors gives; rows 4 and 5 are equally far
+    assert len(diverse) == 3
+    assert diverse[0][0] == 1
+    assert {r[0] for r in diverse} == {1, 4, 5}
 
 
 def test_runtime_oversample_rejects_trailing_text(db):
