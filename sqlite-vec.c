@@ -3071,7 +3071,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
   }
 
   // any other tokens left should be column-level options , ex `key=value`
-  // ex `distance_metric=L2 distance_metric=cosine` should error
+  // A later option replaces an earlier one, as in
+  // `distance_metric=L2 distance_metric=cosine`, which is cosine.
   while (1) {
     // should be EOF or identifier (option key)
     rc = vec0_scanner_next(&scanner, &token);
