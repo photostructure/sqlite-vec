@@ -2885,10 +2885,13 @@ size_t vector_column_byte_size(struct VectorColumnDefinition column) {
  * through its ')': `quantizer=bit` or `quantizer=int8`, which is required, and
  * `oversample=N` with N from 1 to 128, 8 when omitted, separated by commas.
  *
+ * @param strict true to require whole keywords and no comma before the ')';
+ * false to accept a prefix of a keyword and a comma there, as upstream does
  * @return SQLITE_OK, or SQLITE_ERROR for any other text.
  */
 static int vec0_parse_rescore_options(struct Vec0Scanner *scanner,
-                                      struct Vec0RescoreConfig *outConfig) {
+                                      struct Vec0RescoreConfig *outConfig,
+                                      bool strict) {
   struct Vec0Token token;
   int hasQuantizer = 0;
   outConfig->oversample = 8;
@@ -2912,19 +2915,19 @@ static int vec0_parse_rescore_options(struct Vec0Scanner *scanner,
     if (rc != VEC0_TOKEN_RESULT_SOME) {
       return SQLITE_ERROR;
     }
-    if (vec0_token_is_keyword(&key, "quantizer", true)) {
+    if (vec0_token_is_keyword(&key, "quantizer", strict)) {
       if (token.token_type != TOKEN_TYPE_IDENTIFIER) {
         return SQLITE_ERROR;
       }
-      if (vec0_token_is_keyword(&token, "bit", true)) {
+      if (vec0_token_is_keyword(&token, "bit", strict)) {
         outConfig->quantizer_type = VEC0_RESCORE_QUANTIZER_BIT;
-      } else if (vec0_token_is_keyword(&token, "int8", true)) {
+      } else if (vec0_token_is_keyword(&token, "int8", strict)) {
         outConfig->quantizer_type = VEC0_RESCORE_QUANTIZER_INT8;
       } else {
         return SQLITE_ERROR;
       }
       hasQuantizer = 1;
-    } else if (vec0_token_is_keyword(&key, "oversample", true)) {
+    } else if (vec0_token_is_keyword(&key, "oversample", strict)) {
       if (token.token_type != TOKEN_TYPE_DIGIT) {
         return SQLITE_ERROR;
       }
@@ -2948,10 +2951,26 @@ static int vec0_parse_rescore_options(struct Vec0Scanner *scanner,
       return SQLITE_ERROR;
     }
     rc = vec0_scanner_next(scanner, &token);
+    if (!strict && rc == VEC0_TOKEN_RESULT_SOME &&
+        token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
   }
   return hasQuantizer ? SQLITE_OK : SQLITE_ERROR;
 }
 #endif
+
+/**
+ * @brief Whether vec0 2.0.2 and earlier scanned the token. They scanned no '(',
+ * ')' or ',', so a definition they created has none where a non-strict parse
+ * accepts any token: `x float(2)` is the float metadata column they created,
+ * not a vector column.
+ */
+static int vec0_token_is_legacy(const struct Vec0Token *token) {
+  return token->token_type != TOKEN_TYPE_LPAREN &&
+         token->token_type != TOKEN_TYPE_RPAREN &&
+         token->token_type != TOKEN_TYPE_COMMA;
+}
 
 /**
  * @brief Parse an vec0 vtab argv[i] column definition and see if
@@ -2962,8 +2981,8 @@ static int vec0_parse_rescore_options(struct Vec0Scanner *scanner,
  * @param outColumn Output the parse vector column to this struct, if success
  * @param strict true to require an identifier for the name, '[' and ']' around
  * the dimensions, and identifiers for option keys and values; false to accept
- * any token there, as vec0 2.0.2 and earlier did when they created tables such
- * as `5 float[4]` and `a float[4] +=cosine`
+ * there any token that vec0 2.0.2 and earlier scanned, as they did when they
+ * created tables such as `5 float[4]` and `a float[4] +=cosine`
  * @return int SQLITE_OK on success, SQLITE_EMPTY is it's not a vector column
  * definition, SQLITE_ERROR on error.
  */
@@ -2994,7 +3013,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
   rc = vec0_scanner_next(&scanner, &token);
 
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      (strict && token.token_type != TOKEN_TYPE_IDENTIFIER)) {
+      (strict ? token.token_type != TOKEN_TYPE_IDENTIFIER
+              : !vec0_token_is_legacy(&token))) {
     return SQLITE_EMPTY;
   }
 
@@ -3023,7 +3043,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
   // left '[' bracket
   rc = vec0_scanner_next(&scanner, &token);
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      (strict && token.token_type != TOKEN_TYPE_LBRACKET)) {
+      (strict ? token.token_type != TOKEN_TYPE_LBRACKET
+              : !vec0_token_is_legacy(&token))) {
     return SQLITE_EMPTY;
   }
 
@@ -3044,7 +3065,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
   // // right ']' bracket
   rc = vec0_scanner_next(&scanner, &token);
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      (strict && token.token_type != TOKEN_TYPE_RBRACKET)) {
+      (strict ? token.token_type != TOKEN_TYPE_RBRACKET
+              : !vec0_token_is_legacy(&token))) {
     return SQLITE_ERROR;
   }
 
@@ -3058,7 +3080,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
     }
 
     if (rc != VEC0_TOKEN_RESULT_SOME ||
-        (strict && token.token_type != TOKEN_TYPE_IDENTIFIER)) {
+        (strict ? token.token_type != TOKEN_TYPE_IDENTIFIER
+                : !vec0_token_is_legacy(&token))) {
       return SQLITE_ERROR;
     }
 
@@ -3079,7 +3102,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
       // distance_metric value, an identifier (L2, cosine, etc)
       rc = vec0_scanner_next(&scanner, &token);
       if (rc != VEC0_TOKEN_RESULT_SOME ||
-          (strict && token.token_type != TOKEN_TYPE_IDENTIFIER)) {
+          (strict ? token.token_type != TOKEN_TYPE_IDENTIFIER
+                  : !vec0_token_is_legacy(&token))) {
         return SQLITE_ERROR;
       }
 
@@ -3095,13 +3119,14 @@ int vec0_parse_vector_column(const char *source, int source_length,
         return SQLITE_ERROR;
       }
     }
-    // `indexed by flat()` or `indexed by rescore(...)`. No table predates the
-    // clause, so its keywords match exactly whether or not the parse is strict.
-    else if (vec0_token_is_keyword(&token, "indexed", true)) {
+    // `indexed by flat()` or `indexed by rescore(...)`. Connect matches the
+    // keywords by prefix, as upstream does at CREATE too, so a table upstream
+    // created as `index by f()` opens.
+    else if (vec0_token_is_keyword(&token, "indexed", strict)) {
       rc = vec0_scanner_next(&scanner, &token);
       if (rc != VEC0_TOKEN_RESULT_SOME ||
           token.token_type != TOKEN_TYPE_IDENTIFIER ||
-          !vec0_token_is_keyword(&token, "by", true)) {
+          !vec0_token_is_keyword(&token, "by", strict)) {
         return SQLITE_ERROR;
       }
       rc = vec0_scanner_next(&scanner, &token);
@@ -3109,7 +3134,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
           token.token_type != TOKEN_TYPE_IDENTIFIER) {
         return SQLITE_ERROR;
       }
-      if (vec0_token_is_keyword(&token, "flat", true)) {
+      if (vec0_token_is_keyword(&token, "flat", strict)) {
         indexType = VEC0_INDEX_TYPE_FLAT;
         rc = vec0_scanner_next(&scanner, &token);
         if (rc != VEC0_TOKEN_RESULT_SOME ||
@@ -3123,7 +3148,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
         }
       }
 #if SQLITE_VEC_ENABLE_RESCORE
-      else if (vec0_token_is_keyword(&token, "rescore", true)) {
+      else if (vec0_token_is_keyword(&token, "rescore", strict)) {
         indexType = VEC0_INDEX_TYPE_RESCORE;
         if (elementType != SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
           return SQLITE_ERROR;
@@ -3133,7 +3158,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
             token.token_type != TOKEN_TYPE_LPAREN) {
           return SQLITE_ERROR;
         }
-        if (vec0_parse_rescore_options(&scanner, &rescoreConfig) != SQLITE_OK) {
+        if (vec0_parse_rescore_options(&scanner, &rescoreConfig, strict) !=
+            SQLITE_OK) {
           return SQLITE_ERROR;
         }
         if (rescoreConfig.quantizer_type == VEC0_RESCORE_QUANTIZER_BIT &&

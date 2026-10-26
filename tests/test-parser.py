@@ -496,6 +496,8 @@ def test_create_accepts_whole_keywords_in_any_case(db, declaration, kind):
         ("x text", "x te", "text metadata"),
         ("x text", "x text collate nocase", "text metadata"),
         ("id integer", "id integer prim", "integer metadata"),
+        ("x float", "x float(2)", "float metadata"),
+        ("x float64", "x float64(2)", "float metadata"),
     ],
 )
 def test_connect_accepts_keyword_prefix_and_tokens_after_definition(
@@ -586,6 +588,49 @@ def test_connect_accepts_vector_definition_earlier_releases_created(
         f"select rowid, round(distance, 4) from v where {column} match '[2, 0]' and k = 2"
     )
     assert rows.fetchall() == distances
+    con.close()
+
+
+# Upstream matches the keywords of `indexed by` by prefix and accepts a comma
+# before rescore's `)`, at CREATE too, so its tables can store `index by f()`
+# and `rescore(quantizer=int8,)`. CREATE here wants whole keywords and no
+# trailing comma; connect opens such a table.
+@pytest.mark.parametrize(
+    "created, stored",
+    [
+        ("indexed by flat()", "index by flat()"),
+        ("indexed by flat()", "indexed b f()"),
+        (
+            "indexed by rescore(quantizer=int8, oversample=16)",
+            "indexed by rescor(quant=i, over=16)",
+        ),
+        (
+            "indexed by rescore(quantizer=int8, oversample=16)",
+            "indexed by rescore(quantizer=int8, oversample=16,)",
+        ),
+    ],
+)
+def test_connect_accepts_index_clause_keyword_prefix(db, tmp_path, created, stored):
+    with pytest.raises(
+        sqlite3.OperationalError, match="(?i)^vec0 constructor error: could not parse"
+    ):
+        db.execute(f"create virtual table v using vec0(a float[2] {stored})")
+
+    path = str(tmp_path / "test.db")
+    con = connect_file(path)
+    con.execute(f"create virtual table v using vec0(a float[2] {created})")
+    con.execute("insert into v(rowid, a) values (1, '[1, 0]'), (2, '[0, 1]')")
+    con.execute("pragma writable_schema = on")
+    con.execute(
+        "update sqlite_master set sql = ? where name = 'v'",
+        [f"create virtual table v using vec0(a float[2] {stored})"],
+    )
+    con.commit()
+    con.close()
+
+    con = connect_file(path)
+    rows = con.execute("select rowid from v where a match '[1, 0.1]' and k = 2")
+    assert rows.fetchall() == [(1,), (2,)]
     con.close()
 
 

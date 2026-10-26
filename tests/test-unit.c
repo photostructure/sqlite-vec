@@ -482,11 +482,16 @@ void test_vec0_parse_vector_column() {
     assert(rc == SQLITE_ERROR);
   }
 
-  // Error: a prefix of a keyword, even when not strict
+  // A prefix of a keyword: an error when strict, read as upstream reads it
+  // when not
   {
-    const char *input = "emb float[768] index by flat()";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    const char *input = "emb float[768] index by f()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_ERROR);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    sqlite3_free(col.name);
   }
 
   printf("  All vec0_parse_vector_column tests passed.\n");
@@ -810,16 +815,30 @@ void test_vec0_parse_vector_column_rescore() {
     assert(rc == SQLITE_ERROR);
   }
 
-  // Error: a prefix of a keyword, even when not strict
+  // A prefix of a keyword: an error when strict, read as upstream reads it
+  // when not
   {
-    const char *input = "emb float[128] indexed by rescor(quantizer=bit)";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    const char *input = "emb float[128] indexed by rescor(quant=i, over=16)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_ERROR);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_RESCORE);
+    assert(col.rescore.quantizer_type == VEC0_RESCORE_QUANTIZER_INT8);
+    assert(col.rescore.oversample == 16);
+    sqlite3_free(col.name);
   }
+  // A comma before ')': an error when strict, accepted as upstream accepts it
+  // when not
   {
-    const char *input = "emb float[128] indexed by rescore(quant=bit)";
-    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    const char *input = "emb float[128] indexed by rescore(quantizer=bit,)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
     assert(rc == SQLITE_ERROR);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_RESCORE);
+    assert(col.rescore.quantizer_type == VEC0_RESCORE_QUANTIZER_BIT);
+    sqlite3_free(col.name);
   }
 
   printf("  All vec0_parse_vector_column_rescore tests passed.\n");
