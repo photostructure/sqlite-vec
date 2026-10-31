@@ -52,6 +52,14 @@ static float fuzz_extreme_float(const uint8_t **data, size_t *size) {
   return 0.0f;
 }
 
+/*
+ * Seeding the graph reads 2 option bytes and 16 vectors of at least 16 bytes,
+ * so an input that reaches a query is at least 260 bytes, and libFuzzer's
+ * inputs grew only to 43 bytes in a 60-second run from an empty corpus. So
+ * corpus/diskann-int8-quant/ holds a seed per metric that queries, inserts
+ * and deletes after the setup; a change to the order this function reads its
+ * bytes in needs new seeds.
+ */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (size < 40) return 0;
 

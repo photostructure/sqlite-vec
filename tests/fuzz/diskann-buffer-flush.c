@@ -35,6 +35,12 @@ static uint8_t fuzz_byte(const uint8_t **data, size_t *size, uint8_t def) {
   return b;
 }
 
+/*
+ * An input that fills the buffer and flushes it is at least 23 bytes, and
+ * libFuzzer's inputs grew only to 21 bytes in a 60-second run from an empty
+ * corpus, so corpus/diskann-buffer-flush/ holds a seed that flushes the
+ * buffer, deletes a row of the graph and queries with a row still buffered.
+ */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (size < 16) return 0;
 

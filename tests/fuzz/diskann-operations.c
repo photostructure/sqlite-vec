@@ -11,6 +11,12 @@
 #include "sqlite3.h"
 #include <assert.h>
 
+/*
+ * An input that inserts a row and then deletes it is at least 12 bytes, and
+ * in a 60-second run from an empty corpus libFuzzer's inputs grew to 14 bytes
+ * without one, so corpus/diskann-operations/ holds a seed that inserts three
+ * rows, then queries, deletes and scans.
+ */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (size < 6) return 0;
 

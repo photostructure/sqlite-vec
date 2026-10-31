@@ -33,16 +33,18 @@ static uint8_t fuzz_byte(const uint8_t **data, size_t *size, uint8_t def) {
   return b;
 }
 
-static uint16_t fuzz_u16(const uint8_t **data, size_t *size) {
-  uint8_t lo = fuzz_byte(data, size, 0);
-  uint8_t hi = fuzz_byte(data, size, 0);
-  return (uint16_t)hi << 8 | lo;
-}
-
 static float fuzz_float(const uint8_t **data, size_t *size) {
   return (float)((int8_t)fuzz_byte(data, size, 0)) / 10.0f;
 }
 
+/*
+ * Seeding the graph reads 4 option bytes and 16 or 32 vectors of at least 8
+ * bytes, so an input that reaches a query is at least 134 bytes, and
+ * libFuzzer's inputs grew only to 33 bytes in a 60-second run from an empty
+ * corpus. So corpus/diskann-deep-search/ holds a seed per quantizer that
+ * queries, deletes and inserts after the setup; a change to the order this
+ * function reads its bytes in needs new seeds.
+ */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (size < 32) return 0;
 
@@ -59,10 +61,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
   /* search_list_size: small so beam search terminates quickly but still exercises loops */
   int search_list_size = 8 + (fuzz_byte(&data, &size, 0) % 24);
-
-  /* alpha: vary to test RobustPrune pruning logic */
-  float alpha_choices[] = {1.0f, 1.2f, 1.5f, 2.0f};
-  float alpha = alpha_choices[fuzz_byte(&data, &size, 0) % 4];
 
   int rc;
   sqlite3 *db;

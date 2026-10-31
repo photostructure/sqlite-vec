@@ -39,6 +39,14 @@ static uint8_t fuzz_byte(const uint8_t **data, size_t *size, uint8_t def) {
   return b;
 }
 
+/*
+ * Seeding the graph reads a quantizer byte and 10 vectors of 8 bytes, so an
+ * input that reaches a delete is at least 83 bytes, and libFuzzer's inputs
+ * grew only to 21 bytes in a 60-second run from an empty corpus. So
+ * corpus/diskann-delete-stress/ holds a seed per quantizer that deletes,
+ * reinserts, queries and deletes every row after the setup; a change to the
+ * order this function reads its bytes in needs new seeds.
+ */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (size < 20) return 0;
 
