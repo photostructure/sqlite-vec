@@ -1041,11 +1041,8 @@ def test_diskann_knn_recall_after_inserts(db):
         if rows and rows[0][0] == rid:
             correct += 1
 
-    # With binary quantizer, approximate search may not always return exact match
-    # but should have high recall (at least 80%)
-    assert (
-        correct >= len(vectors) * 0.8
-    ), f"Top-1 recall too low: {correct}/{len(vectors)}"
+    # The 50 rows fit in the search list, and results rank by exact distance
+    assert correct == len(vectors), f"Top-1 recall: {correct}/{len(vectors)}"
 
 
 def test_diskann_knn_k_larger_than_table(db):
@@ -1066,34 +1063,35 @@ def test_diskann_knn_k_larger_than_table(db):
 
 
 def test_diskann_knn_cosine_metric(db):
-    """KNN with cosine distance metric."""
+    """
+    KNN ranks by cosine distance and returns it: rows whose norms differ rank
+    otherwise under L2 (1, 5, 3, 2, 4).
+    """
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
             emb float[8] distance_metric=cosine INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
         )
     """)
-    # Insert orthogonal-ish vectors
-    db.execute(
-        "INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1, 0, 0, 0, 0, 0, 0, 0])]
-    )
-    db.execute(
-        "INSERT INTO t(rowid, emb) VALUES (2, ?)", [_f32([0, 1, 0, 0, 0, 0, 0, 0])]
-    )
-    db.execute(
-        "INSERT INTO t(rowid, emb) VALUES (3, ?)", [_f32([0.7, 0.7, 0, 0, 0, 0, 0, 0])]
-    )
-
+    vectors = {
+        1: [1, 0],
+        2: [0, 1],
+        3: [0.7, 0.7],
+        4: [10, 5],
+        5: [0.3, 0.1],
+    }
+    for rowid, vec in vectors.items():
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32(vec + [0] * 6)]
+        )
+    query = _f32([1] + [0] * 7)
     rows = db.execute(
-        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=3",
-        [_f32([1, 0, 0, 0, 0, 0, 0, 0])],
+        "SELECT rowid, distance, vec_distance_cosine(emb, ?) FROM t"
+        " WHERE emb MATCH ? AND k = 5",
+        [query, query],
     ).fetchall()
-    assert len(rows) == 3
-    # rowid 1 should be closest (exact match in direction)
-    assert rows[0][0] == 1
-    # Distances should be sorted
-    distances = [r[1] for r in rows]
-    for i in range(len(distances) - 1):
-        assert distances[i] <= distances[i + 1]
+    assert [r[0] for r in rows] == [1, 5, 4, 3, 2]
+    for _, distance, cosine in rows:
+        assert distance == pytest.approx(cosine, abs=1e-6)
 
 
 def test_diskann_knn_after_heavy_churn(db):
@@ -1511,7 +1509,10 @@ def test_diskann_knn_answers_as_flat_when_the_search_covers_the_table(
 
 @pytest.mark.parametrize("quantizer", ["int8", "binary"])
 def test_diskann_int8_column(db, quantizer):
-    """An int8 column's vectors are quantized as int8 values, query included."""
+    """
+    With a search list covering the table, an int8 column's KNN, query and
+    distances included, answers as brute force does.
+    """
     db.execute(f"""
         CREATE VIRTUAL TABLE t USING vec0(
             emb int8[64] INDEXED BY diskann(neighbor_quantizer={quantizer},
@@ -1826,6 +1827,39 @@ def test_shadow_diskann_tables(db):
     }
 
 
+# This build finds 166 (int8) and 104 (binary) of the 200. A build that reads
+# the query as floats, as upstream's at 04d28bd does, reads past the query and
+# finds 8 to 18 (int8) and 2 to 12 (binary), depending on the memory there.
+@pytest.mark.parametrize("quantizer, floor", [("int8", 120), ("binary", 60)])
+def test_diskann_int8_column_query_quantized_as_int8(db, quantizer, floor):
+    """
+    With a search list shorter than the table, an int8 query quantized as
+    int8 finds its neighbors; read as floats, as upstream reads it, it does not.
+    """
+    db.execute(f"""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb int8[64] INDEXED BY diskann(neighbor_quantizer={quantizer},
+                                            n_neighbors=16, search_list_size=32)
+        )
+    """)
+    db.execute("CREATE VIRTUAL TABLE f USING vec0(emb int8[64])")
+    rng = random.Random(21)
+    for rowid in range(1, 1001):
+        vec = struct.pack("64b", *[rng.randint(-128, 127) for _ in range(64)])
+        for table in ("t", "f"):
+            db.execute(
+                f"INSERT INTO {table}(rowid, emb) VALUES (?, vec_int8(?))", [rowid, vec]
+            )
+    found = 0
+    for _ in range(20):
+        query = struct.pack("64b", *[rng.randint(-128, 127) for _ in range(64)])
+        sql = "SELECT rowid FROM {} WHERE emb MATCH vec_int8(?) AND k = 10"
+        got = {r[0] for r in db.execute(sql.format("t"), [query])}
+        want = {r[0] for r in db.execute(sql.format("f"), [query])}
+        found += len(got & want)
+    assert found >= floor
+
+
 def test_diskann_point_query_for_a_missing_rowid(db):
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
@@ -1856,10 +1890,35 @@ def test_diskann_corrupt_node_blob_errors(db):
     db.execute(
         "UPDATE t_diskann_nodes00 SET neighbor_ids = x'00' WHERE rowid = ?", [medoid]
     )
-    with pytest.raises(sqlite3.OperationalError, match="corrupt"):
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=f"^node {medoid} of the DiskANN graph of vector column 0 is corrupt$",
+    ):
         db.execute(
             "SELECT rowid FROM t WHERE emb MATCH ? AND k = 3", [_f32([1] + [0] * 7)]
         ).fetchall()
+
+
+def test_diskann_delete_scrub_errors_on_a_corrupt_node(db):
+    """
+    The scrub of a DELETE reads every node, and fails on one whose blob has
+    the wrong size, naming it, rather than skip it.
+    """
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    for rowid in range(1, 6):
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([rowid] * 8)]
+        )
+    db.execute("UPDATE t_diskann_nodes00 SET neighbor_ids = x'00' WHERE rowid = 5")
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="^node 5 of the DiskANN graph of vector column 0 is corrupt$",
+    ):
+        db.execute("DELETE FROM t WHERE rowid = 1")
 
 
 def test_diskann_corrupt_vector_blob_errors(db):
@@ -2085,7 +2144,13 @@ def test_diskann_optimize_beside_a_flat_column(db):
     for rowid in range(1, 41, 3):
         db.execute("DELETE FROM t WHERE rowid = ?", [rowid])
         del rows[rowid]
+    chunks = "SELECT count(*) FROM t_chunks"
+    positions = "SELECT rowid, chunk_id, chunk_offset FROM t_rowids ORDER BY rowid"
+    chunks_before = db.execute(chunks).fetchone()[0]
+    positions_before = db.execute(positions).fetchall()
     db.execute("INSERT INTO t(t) VALUES ('optimize')")
+    assert db.execute(chunks).fetchone()[0] < chunks_before
+    assert db.execute(positions).fetchall() != positions_before
     for rowid, f, d in db.execute("SELECT rowid, f, d FROM t").fetchall():
         assert f == _f32(rows[rowid])
         assert d == _f32([-x for x in rows[rowid]])
