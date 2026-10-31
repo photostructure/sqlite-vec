@@ -49,14 +49,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   {
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db,
-      "INSERT INTO v(v, emb) VALUES (?, ?)", -1, &stmt, NULL);
+      "INSERT INTO v(rowid, emb) VALUES (?, ?)", -1, &stmt, NULL);
     for (int i = 1; i <= 8; i++) {
       float vec[8];
       for (int j = 0; j < 8; j++) vec[j] = (float)i * 0.1f + (float)j * 0.01f;
       sqlite3_reset(stmt);
       sqlite3_bind_int64(stmt, 1, i);
       sqlite3_bind_blob(stmt, 2, vec, sizeof(vec), SQLITE_TRANSIENT);
-      sqlite3_step(stmt);
+      rc = sqlite3_step(stmt);
+      assert(rc == SQLITE_DONE);
     }
     sqlite3_finalize(stmt);
   }
@@ -69,7 +70,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   sqlite3_prepare_v2(db,
     "INSERT INTO v(v) VALUES (?)", -1, &stmtCmd, NULL);
   sqlite3_prepare_v2(db,
-    "INSERT INTO v(v, emb) VALUES (?, ?)", -1, &stmtInsert, NULL);
+    "INSERT INTO v(rowid, emb) VALUES (?, ?)", -1, &stmtInsert, NULL);
   sqlite3_prepare_v2(db,
     "SELECT rowid, distance FROM v WHERE emb MATCH ? AND k = ?",
     -1, &stmtKnn, NULL);
@@ -84,10 +85,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
       case 0: { /* Send fuzz command string */
         int cmd_len = fuzz_byte(&data, &size, 0) % 64;
         char cmd[65];
-        for (int i = 0; i < cmd_len && size > 0; i++) {
-          cmd[i] = (char)fuzz_byte(&data, &size, 0);
+        int n = 0;
+        while (n < cmd_len && size > 0) {
+          cmd[n++] = (char)fuzz_byte(&data, &size, 0);
         }
-        cmd[cmd_len] = '\0';
+        cmd[n] = '\0';
         sqlite3_reset(stmtCmd);
         sqlite3_bind_text(stmtCmd, 1, cmd, -1, SQLITE_TRANSIENT);
         sqlite3_step(stmtCmd); /* May fail -- that's expected */
