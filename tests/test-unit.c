@@ -1043,6 +1043,15 @@ void test_vec0_parse_vector_column_diskann() {
   printf("  All vec0_parse_vector_column_diskann tests passed.\n");
 }
 
+// the number of slots a validity bitmap marks valid
+static int validity_count(const unsigned char *validity, int n_neighbors) {
+  int count = 0;
+  for (int i = 0; i < n_neighbors; i++) {
+    count += diskann_validity_get(validity, i);
+  }
+  return count;
+}
+
 void test_diskann_validity_bitmap() {
   printf("Starting %s...\n", __func__);
 
@@ -1052,26 +1061,26 @@ void test_diskann_validity_bitmap() {
   for (int i = 0; i < 24; i++) {
     assert(diskann_validity_get(validity, i) == 0);
   }
-  assert(diskann_validity_count(validity, 24) == 0);
+  assert(validity_count(validity, 24) == 0);
 
   diskann_validity_set(validity, 0, 1);
   assert(diskann_validity_get(validity, 0) == 1);
-  assert(diskann_validity_count(validity, 24) == 1);
+  assert(validity_count(validity, 24) == 1);
 
   // the last bit of the first byte and the first of the second
   diskann_validity_set(validity, 7, 1);
   diskann_validity_set(validity, 8, 1);
   assert(diskann_validity_get(validity, 7) == 1);
   assert(diskann_validity_get(validity, 8) == 1);
-  assert(diskann_validity_count(validity, 24) == 3);
+  assert(validity_count(validity, 24) == 3);
 
   diskann_validity_set(validity, 23, 1);
   assert(diskann_validity_get(validity, 23) == 1);
-  assert(diskann_validity_count(validity, 24) == 4);
+  assert(validity_count(validity, 24) == 4);
 
   diskann_validity_set(validity, 0, 0);
   assert(diskann_validity_get(validity, 0) == 0);
-  assert(diskann_validity_count(validity, 24) == 3);
+  assert(validity_count(validity, 24) == 3);
   assert(diskann_validity_get(validity, 7) == 1);
   assert(diskann_validity_get(validity, 8) == 1);
 
@@ -1192,7 +1201,7 @@ void test_diskann_node_init_sizes() {
   assert(validitySize == 9);  // 72 / 8
   assert(idsSize == 576);     // 72 * 8
   assert(qvecsSize == 9216);  // 72 * 1024 / 8
-  assert(diskann_validity_count(validity, 72) == 0);
+  assert(validity_count(validity, 72) == 0);
   sqlite3_free(validity);
   sqlite3_free(ids);
   sqlite3_free(qvecs);
@@ -1234,7 +1243,7 @@ void test_diskann_node_set_clear_neighbor() {
   diskann_node_set_neighbor(validity, ids, qvecs, 3, 42, test_qvec,
                             VEC0_DISKANN_QUANTIZER_BINARY, 16);
   assert(diskann_validity_get(validity, 3) == 1);
-  assert(diskann_validity_count(validity, 8) == 1);
+  assert(validity_count(validity, 8) == 1);
   assert(diskann_neighbor_id_get(ids, 3) == 42);
   const unsigned char *read_qvec =
       diskann_neighbor_qvec_get(qvecs, 3, VEC0_DISKANN_QUANTIZER_BINARY, 16);
@@ -1246,7 +1255,7 @@ void test_diskann_node_set_clear_neighbor() {
   assert(diskann_validity_get(validity, 3) == 0);
   assert(diskann_neighbor_id_get(ids, 3) == 0);
   assert(read_qvec[0] == 0 && read_qvec[1] == 0);
-  assert(diskann_validity_count(validity, 8) == 0);
+  assert(validity_count(validity, 8) == 0);
 
   sqlite3_free(validity);
   sqlite3_free(ids);

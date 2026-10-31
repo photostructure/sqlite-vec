@@ -10653,14 +10653,6 @@ void diskann_validity_set(u8 *validity, int i, int value) {
   }
 }
 
-int diskann_validity_count(const u8 *validity, int n_neighbors) {
-  int count = 0;
-  for (int i = 0; i < n_neighbors; i++) {
-    count += diskann_validity_get(validity, i);
-  }
-  return count;
-}
-
 i64 diskann_neighbor_id_get(const u8 *neighbor_ids, int i) {
   i64 rowid;
   memcpy(&rowid, neighbor_ids + i * sizeof(i64), sizeof(i64));

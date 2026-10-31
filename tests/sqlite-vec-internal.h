@@ -161,7 +161,6 @@ int diskann_node_init(int n_neighbors,
                       int *outNeighborQvecsSize);
 int diskann_validity_get(const unsigned char *validity, int i);
 void diskann_validity_set(unsigned char *validity, int i, int value);
-int diskann_validity_count(const unsigned char *validity, int n_neighbors);
 long long diskann_neighbor_id_get(const unsigned char *neighbor_ids, int i);
 void diskann_neighbor_id_set(unsigned char *neighbor_ids, int i,
                              long long rowid);
