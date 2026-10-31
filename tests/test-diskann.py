@@ -1479,14 +1479,17 @@ def _random_rows(seed, n, dims):
         ("k = 6 AND mmr_lambda = 0.2 AND distance > 0.3", []),
     ],
 )
+# with buffer_threshold=25, 10 of the 60 rows are still in the buffer
+@pytest.mark.parametrize("buffered", [0, 10])
 def test_diskann_knn_answers_as_flat_when_the_search_covers_the_table(
-    db, where, params
+    db, where, params, buffered
 ):
-    db.execute("""
+    threshold = ", buffer_threshold=25" if buffered else ""
+    db.execute(f"""
         CREATE VIRTUAL TABLE d USING vec0(
             emb float[16] distance_metric=cosine
                 INDEXED BY diskann(neighbor_quantizer=int8, n_neighbors=8,
-                                   search_list_size=128)
+                                   search_list_size=128{threshold})
         )
     """)
     db.execute(
@@ -1498,6 +1501,9 @@ def test_diskann_knn_answers_as_flat_when_the_search_covers_the_table(
             db.execute(
                 f"INSERT INTO {table}(rowid, emb) VALUES (?, ?)", [rowid, _f32(vec)]
             )
+    assert (
+        db.execute("SELECT count(*) FROM d_diskann_buffer00").fetchone()[0] == buffered
+    )
     rng = random.Random(12)
     for _ in range(10):
         query = _f32([rng.uniform(-1, 1) for _ in range(16)])
@@ -1725,6 +1731,109 @@ def test_diskann_unwritable_buffer_errors(db, event, rows, message):
         match=f"^{message} the DiskANN buffer of vector column 0: refused$",
     ):
         db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [rows, _f32([1.0] * 8)])
+
+
+def _diskann_graph(db, n_neighbors, qsize):
+    """Each node's slots of t's graph, as (valid, rowid, quantized bytes)."""
+    nodes = {}
+    for rowid, validity, ids, qvecs in db.execute(
+        "SELECT rowid, neighbors_validity, neighbor_ids, neighbor_quantized_vectors"
+        " FROM t_diskann_nodes00"
+    ):
+        nodes[rowid] = [
+            (validity[s // 8] >> (s % 8) & 1, nid, qvecs[s * qsize : (s + 1) * qsize])
+            for s, nid in enumerate(struct.unpack(f"{n_neighbors}q", ids))
+        ]
+    return nodes
+
+
+@pytest.mark.parametrize(
+    "kind, quantizer",
+    [("float", "binary"), ("float", "int8"), ("int8", "binary"), ("int8", "int8")],
+)
+def test_diskann_delete_keeps_every_slot_true(db, kind, quantizer):
+    """
+    Deleting 80 of 200 random rows leaves no slot naming a deleted row, also
+    in nodes that named it without being among its neighbors (the scrub's
+    work), clears each freed slot, gives each neighbor that named the deleted
+    row, and lacked one of the row's other neighbors, one of them (the
+    repair's), and leaves every valid slot the quantized form of its row's
+    vector.
+    """
+    dims = 16
+    db.execute(f"""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb {kind}[{dims}] INDEXED BY diskann(
+                neighbor_quantizer={quantizer}, n_neighbors=8
+            )
+        )
+    """)
+    rng = random.Random(3)
+    vectors = {}
+    for rowid in range(1, 201):
+        if kind == "float":
+            values = [rng.gauss(0, 1) for _ in range(dims)]
+            vectors[rowid] = _f32(values)
+            sql = "INSERT INTO t(rowid, emb) VALUES (?, ?)"
+        else:
+            values = [rng.randint(-128, 127) for _ in range(dims)]
+            vectors[rowid] = struct.pack(f"{dims}b", *values)
+            sql = "INSERT INTO t(rowid, emb) VALUES (?, vec_int8(?))"
+        db.execute(sql, [rowid, vectors[rowid]])
+
+    def quantized(rowid):
+        fmt = f"{dims}f" if kind == "float" else f"{dims}b"
+        values = struct.unpack(fmt, vectors[rowid])
+        if quantizer == "int8" and kind == "int8":
+            return vectors[rowid]
+        if quantizer == "int8":
+            # the C quantizer's float32 arithmetic, truncated toward zero
+            f32 = lambda x: struct.unpack("f", struct.pack("f", x))[0]
+            step = f32(2.0 / 255.0)
+            out = []
+            for value in values:
+                v = f32(f32(f32(f32(value) + 1.0) / step) - 128.0)
+                out.append(int(min(max(v, -128.0), 127.0)))
+            return struct.pack(f"{dims}b", *out)
+        bits = bytearray(dims // 8)
+        for d, value in enumerate(values):
+            if value > 0:
+                bits[d // 8] |= 1 << (d % 8)
+        return bytes(bits)
+
+    qsize = dims // 8 if quantizer == "binary" else dims
+    one_way = 0
+    for target in rng.sample(sorted(vectors), 80):
+        before = _diskann_graph(db, 8, qsize)
+        out = [nid for valid, nid, _ in before[target] if valid]
+        one_way += sum(
+            1
+            for node, slots in before.items()
+            if node != target
+            and node not in out
+            and any(valid and nid == target for valid, nid, _ in slots)
+        )
+        lacking = {}
+        for node in out:
+            ids = {nid for valid, nid, _ in before[node] if valid}
+            if target in ids:
+                lacking[node] = {o for o in out if o != node and o not in ids}
+        db.execute("DELETE FROM t WHERE rowid = ?", [target])
+        del vectors[target]
+        after = _diskann_graph(db, 8, qsize)
+        for node, missing in lacking.items():
+            if missing:
+                ids = {nid for valid, nid, _ in after[node] if valid}
+                assert ids & missing, (target, node)
+
+    assert one_way > 0
+    for node, slots in _diskann_graph(db, 8, qsize).items():
+        for valid, nid, qbytes in slots:
+            if valid:
+                assert nid in vectors, (node, nid)
+                assert qbytes == quantized(nid), (node, nid)
+            else:
+                assert (nid, qbytes) == (0, bytes(qsize)), node
 
 
 @pytest.mark.parametrize(

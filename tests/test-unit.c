@@ -1321,6 +1321,17 @@ void test_diskann_prune_select() {
     assert(count == 5);
   }
 
+  // a large alpha covers nothing, and max_neighbors stops the selection
+  {
+    int rc = diskann_prune_select(p_distances, 5, 100.0f, 2,
+                                  test_prune_matrix_distance, inter, selected,
+                                  &count);
+    assert(rc == SQLITE_OK);
+    assert(count == 2);
+    assert(selected[0] == 1 && selected[1] == 1);
+    assert(selected[2] == 0 && selected[3] == 0 && selected[4] == 0);
+  }
+
   // no candidate
   {
     int rc = diskann_prune_select(NULL, 0, 1.2f, 3, test_prune_matrix_distance,
