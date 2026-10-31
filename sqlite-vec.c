@@ -11218,7 +11218,7 @@ int diskann_candidate_list_insert(struct DiskannCandidateList *list, i64 rowid,
     }
   }
   if (list->count >= list->capacity) {
-    if (list->count == 0 || distance >= list->items[list->count - 1].distance) {
+    if (distance >= list->items[list->count - 1].distance) {
       return 0;
     }
     list->count--;
