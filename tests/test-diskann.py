@@ -1600,6 +1600,126 @@ def test_diskann_deleted_medoid_is_replaced_from_the_graph(db):
     assert all(finds_itself(r) for r in nodes())
 
 
+@pytest.mark.parametrize("blob", [b"", b"\x00" * 4])
+def test_diskann_corrupt_buffer_row_errors(db, blob):
+    """A buffered vector of the wrong size fails the flush and a KNN query."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(
+                neighbor_quantizer=binary, buffer_threshold=3
+            )
+        )
+    """)
+    for rowid in (1, 2):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([1.0] * 8)])
+    db.execute("UPDATE t_diskann_buffer00 SET vector = ? WHERE rowid = 1", [blob])
+    for sql, parameters in [
+        ("SELECT rowid FROM t WHERE emb MATCH ? AND k = 2", [_f32([1.0] * 8)]),
+        ("INSERT INTO t(rowid, emb) VALUES (3, ?)", [_f32([1.0] * 8)]),
+    ]:
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="^the DiskANN buffer of vector column 0 is corrupt$",
+        ):
+            db.execute(sql, parameters).fetchall()
+
+
+@pytest.mark.parametrize(
+    "event, rows, message",
+    [
+        ("INSERT", 1, "could not add a row to"),
+        ("DELETE", 2, "could not empty"),
+    ],
+)
+def test_diskann_unwritable_buffer_errors(db, event, rows, message):
+    """A failed statement on the buffer says what it did and SQLite's reason."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(
+                neighbor_quantizer=binary, buffer_threshold=2
+            )
+        )
+    """)
+    db.execute(f"""
+        CREATE TRIGGER refuse BEFORE {event} ON t_diskann_buffer00
+        BEGIN SELECT RAISE(ABORT, 'refused'); END
+    """)
+    for rowid in range(1, rows):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([1.0] * 8)])
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=f"^{message} the DiskANN buffer of vector column 0: refused$",
+    ):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [rows, _f32([1.0] * 8)])
+
+
+@pytest.mark.parametrize(
+    "table, event, buffered, message",
+    [
+        ("t_vectors00", "DELETE", False, "could not change row 2 of t_vectors00"),
+        (
+            "t_diskann_nodes00",
+            "DELETE",
+            False,
+            "could not change row 2 of t_diskann_nodes00",
+        ),
+        (
+            "t_diskann_buffer00",
+            "DELETE",
+            True,
+            "could not change row 2 of t_diskann_buffer00",
+        ),
+        (
+            "t_info",
+            "UPDATE",
+            False,
+            "could not set the DiskANN medoid of vector column 0",
+        ),
+    ],
+)
+def test_diskann_failed_delete_errors(db, table, event, buffered, message):
+    """A delete's failed statement says what it changed and SQLite's reason."""
+    threshold = ", buffer_threshold=8" if buffered else ""
+    db.execute(f"""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary{threshold})
+        )
+    """)
+    for rowid in (1, 2, 3):
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([rowid] * 8)]
+        )
+    db.execute("UPDATE t_info SET value = 2 WHERE key = 'diskann_medoid_00'")
+    db.execute(f"""
+        CREATE TRIGGER refuse BEFORE {event} ON {table}
+        BEGIN SELECT RAISE(ABORT, 'refused'); END
+    """)
+    with pytest.raises(sqlite3.OperationalError, match=f"^{message}: refused$"):
+        db.execute("DELETE FROM t WHERE rowid = 2")
+
+
+def test_diskann_unreadable_buffer_errors(db):
+    """A KNN query whose read of the buffer fails names it and SQLite's reason."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(
+                neighbor_quantizer=binary, buffer_threshold=2
+            )
+        )
+    """)
+    for rowid in (1, 2, 3):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([1.0] * 8)])
+    db.execute("DROP TABLE t_diskann_buffer00")
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="^could not read the DiskANN buffer of vector column 0: "
+        "no such table: main.t_diskann_buffer00$",
+    ):
+        db.execute(
+            "SELECT rowid FROM t WHERE emb MATCH ? AND k = 2", [_f32([1.0] * 8)]
+        ).fetchall()
+
+
 def test_diskann_point_query_for_a_missing_rowid(db):
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
@@ -1634,6 +1754,108 @@ def test_diskann_corrupt_node_blob_errors(db):
         db.execute(
             "SELECT rowid FROM t WHERE emb MATCH ? AND k = 3", [_f32([1] + [0] * 7)]
         ).fetchall()
+
+
+def test_diskann_corrupt_vector_blob_errors(db):
+    """A vector of the wrong size fails each query that reads it, naming it."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    for i in range(3):
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [i + 1, _f32([i + 1.0] * 8)]
+        )
+    db.execute("UPDATE t_vectors00 SET vector = x'00' WHERE rowid = 2")
+    for sql, parameters in [
+        ("SELECT emb FROM t WHERE rowid = 2", []),
+        ("SELECT rowid, emb FROM t", []),
+        ("SELECT rowid FROM t WHERE emb MATCH ? AND k = 3", [_f32([2.0] * 8)]),
+    ]:
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="^the DiskANN vector of row 2 in vector column 0 is corrupt$",
+        ):
+            db.execute(sql, parameters).fetchall()
+
+
+def test_diskann_unreadable_vector_errors(db):
+    """A failed read of a vector names the vector and SQLite's reason."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    for i in range(3):
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [i + 1, _f32([i + 1.0] * 8)]
+        )
+    db.execute("DROP TABLE t_vectors00")
+    for sql, parameters in [
+        ("SELECT emb FROM t WHERE rowid = 2", []),
+        ("SELECT rowid, emb FROM t", []),
+        ("SELECT rowid FROM t WHERE emb MATCH ? AND k = 3", [_f32([2.0] * 8)]),
+    ]:
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="^could not read the DiskANN vector of row [123] in vector "
+            "column 0: no such table: main.t_vectors00$",
+        ):
+            db.execute(sql, parameters).fetchall()
+
+
+def test_diskann_unreadable_node_errors(db):
+    """A failed read of a node names the node and SQLite's reason."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    for i in range(3):
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [i + 1, _f32([i + 1.0] * 8)]
+        )
+    db.execute("DROP TABLE t_diskann_nodes00")
+    for sql, parameters in [
+        ("SELECT rowid FROM t WHERE emb MATCH ? AND k = 3", [_f32([2.0] * 8)]),
+        ("INSERT INTO t(rowid, emb) VALUES (9, ?)", [_f32([9.0] * 8)]),
+        ("DELETE FROM t WHERE rowid = 2", []),
+    ]:
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="^could not read node [123] of the DiskANN graph of vector "
+            "column 0: no such table: main.t_diskann_nodes00$",
+        ):
+            db.execute(sql, parameters).fetchall()
+
+
+@pytest.mark.parametrize(
+    "table, message",
+    [
+        (
+            "t_vectors00",
+            "could not write the DiskANN vector of row 1 in vector column 0",
+        ),
+        (
+            "t_diskann_nodes00",
+            "could not write node 1 of the DiskANN graph of vector column 0",
+        ),
+    ],
+)
+def test_diskann_unwritable_row_errors(db, table, message):
+    """A failed write of a vector or a node names it and SQLite's reason."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    db.execute(f"""
+        CREATE TRIGGER refuse BEFORE INSERT ON {table}
+        BEGIN SELECT RAISE(ABORT, 'refused'); END
+    """)
+    with pytest.raises(sqlite3.OperationalError, match=f"^{message}: refused$"):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1.0] * 8)])
 
 
 @pytest.mark.parametrize(

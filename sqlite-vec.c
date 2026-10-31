@@ -5104,12 +5104,12 @@ int vec0_get_vector_data(vec0_vtab *pVtab, i64 rowid, int vector_column_idx,
       VEC0_INDEX_TYPE_DISKANN) {
     rc = diskann_vector_read(p, vector_column_idx, rowid, outVector,
                              outVectorSize);
-    if (rc != SQLITE_OK) {
+    if (rc == SQLITE_EMPTY) {
       vtab_set_error(&pVtab->base,
                      "Could not fetch vector data for %lld from the DiskANN "
                      "vectors table",
                      rowid);
-      rc = rc == SQLITE_EMPTY ? SQLITE_ERROR : vec0_error_rc(rc);
+      rc = SQLITE_ERROR;
     }
     goto cleanup;
   }
@@ -10811,7 +10811,8 @@ static int diskann_stmt(vec0_vtab *p, sqlite3_stmt **pStmt, const char *zFormat,
 
 /**
  * Runs zFormat, a statement on table zTable of the schema whose one parameter
- * is rowid, to its end.
+ * is rowid, to its end, and sets a message naming the row and the table when
+ * it fails.
  */
 static int diskann_exec_rowid(vec0_vtab *p, const char *zFormat,
                               const char *zTable, i64 rowid) {
@@ -10822,13 +10823,20 @@ static int diskann_exec_rowid(vec0_vtab *p, const char *zFormat,
   }
   int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
   sqlite3_free(zSql);
-  if (rc != SQLITE_OK) {
-    return rc;
+  if (rc == SQLITE_OK) {
+    sqlite3_bind_int64(stmt, 1, rowid);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE) {
+      return SQLITE_OK;
+    }
+    rc = vec0_error_rc(rc);
   }
-  sqlite3_bind_int64(stmt, 1, rowid);
-  rc = sqlite3_step(stmt);
-  sqlite3_finalize(stmt);
-  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base, "could not change row %lld of %s: %s", rowid,
+                   zTable, sqlite3_errmsg(p->db));
+  }
+  return rc;
 }
 
 /**
@@ -10851,23 +10859,29 @@ static int diskann_medoid_get(vec0_vtab *p, int i, i64 *outMedoid,
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
     sqlite3_free(zKey);
-    return rc;
-  }
-  sqlite3_bind_text(stmt, 1, zKey, -1, sqlite3_free);
-  rc = sqlite3_step(stmt);
-  if (rc == SQLITE_ROW) {
-    *outIsEmpty = sqlite3_column_type(stmt, 0) == SQLITE_NULL;
-    *outMedoid = sqlite3_column_int64(stmt, 0);
-    rc = SQLITE_OK;
-  } else if (rc == SQLITE_DONE) {
-    vtab_set_error(&p->base,
-                   "the _info table has no DiskANN medoid for vector column %d",
-                   i);
-    rc = SQLITE_ERROR;
   } else {
+    sqlite3_bind_text(stmt, 1, zKey, -1, sqlite3_free);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+      *outIsEmpty = sqlite3_column_type(stmt, 0) == SQLITE_NULL;
+      *outMedoid = sqlite3_column_int64(stmt, 0);
+      sqlite3_finalize(stmt);
+      return SQLITE_OK;
+    }
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE) {
+      vtab_set_error(
+          &p->base,
+          "the _info table has no DiskANN medoid for vector column %d", i);
+      return SQLITE_ERROR;
+    }
     rc = vec0_error_rc(rc);
   }
-  sqlite3_finalize(stmt);
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not read the DiskANN medoid of vector column %d: %s",
+                   i, sqlite3_errmsg(p->db));
+  }
   return rc;
 }
 
@@ -10889,7 +10903,7 @@ static int diskann_medoid_set(vec0_vtab *p, int i, i64 medoid, int isEmpty) {
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
     sqlite3_free(zKey);
-    return rc;
+    goto failed;
   }
   if (isEmpty) {
     sqlite3_bind_null(stmt, 1);
@@ -10899,14 +10913,26 @@ static int diskann_medoid_set(vec0_vtab *p, int i, i64 medoid, int isEmpty) {
   sqlite3_bind_text(stmt, 2, zKey, -1, sqlite3_free);
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
-  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+  if (rc == SQLITE_DONE) {
+    return SQLITE_OK;
+  }
+  rc = vec0_error_rc(rc);
+
+failed:
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not set the DiskANN medoid of vector column %d: %s",
+                   i, sqlite3_errmsg(p->db));
+  }
+  return rc;
 }
 
 /**
  * Reads node rowid of column i: its validity bitmap, its neighbors' rowids
  * and their quantized vectors, each to be freed with sqlite3_free(). Returns
  * SQLITE_EMPTY when the graph has no such node, and SQLITE_ERROR when a blob
- * is not the size the column's options give it.
+ * is not the size the column's options give it; sets a message naming the
+ * node when it cannot read it.
  */
 static int diskann_node_read(vec0_vtab *p, int i, i64 rowid, u8 **outValidity,
                              int *outValiditySize, u8 **outNeighborIds,
@@ -10914,20 +10940,25 @@ static int diskann_node_read(vec0_vtab *p, int i, i64 rowid, u8 **outValidity,
                              int *outQvecsSize) {
   struct VectorColumnDefinition *col = &p->vector_columns[i];
   struct Vec0DiskannConfig *cfg = &col->diskann;
+  sqlite3_stmt *stmt = NULL;
   int rc = diskann_stmt(p, &p->stmtDiskannNodeRead[i],
                         "SELECT neighbors_validity, neighbor_ids, "
                         "neighbor_quantized_vectors FROM \"%w\".\"%w\" "
                         "WHERE rowid = ?",
                         p->shadowDiskannNodesNames[i]);
   if (rc != SQLITE_OK) {
-    return rc;
+    goto failed;
   }
-  sqlite3_stmt *stmt = p->stmtDiskannNodeRead[i];
+  stmt = p->stmtDiskannNodeRead[i];
   sqlite3_bind_int64(stmt, 1, rowid);
   rc = sqlite3_step(stmt);
-  if (rc != SQLITE_ROW) {
-    rc = rc == SQLITE_DONE ? SQLITE_EMPTY : vec0_error_rc(rc);
+  if (rc == SQLITE_DONE) {
+    rc = SQLITE_EMPTY;
     goto done;
+  }
+  if (rc != SQLITE_ROW) {
+    rc = vec0_error_rc(rc);
+    goto failed;
   }
 
   const void *blobs[3];
@@ -10969,15 +11000,26 @@ static int diskann_node_read(vec0_vtab *p, int i, i64 rowid, u8 **outValidity,
   *outQvecs = copies[2];
   *outQvecsSize = sizes[2];
   rc = SQLITE_OK;
+  goto done;
 
+failed:
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not read node %lld of the DiskANN graph of vector "
+                   "column %d: %s",
+                   rowid, i, sqlite3_errmsg(p->db));
+  }
 done:
-  sqlite3_reset(stmt);
-  sqlite3_clear_bindings(stmt);
+  if (stmt) {
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+  }
   return rc;
 }
 
 /**
- * Writes node rowid of column i, replacing the row it had.
+ * Writes node rowid of column i, replacing the row it had, and sets a message
+ * naming the node when it cannot.
  */
 static int diskann_node_write(vec0_vtab *p, int i, i64 rowid,
                               const u8 *validity, int validitySize,
@@ -10988,39 +11030,54 @@ static int diskann_node_write(vec0_vtab *p, int i, i64 rowid,
                         "neighbors_validity, neighbor_ids, "
                         "neighbor_quantized_vectors) VALUES (?, ?, ?, ?)",
                         p->shadowDiskannNodesNames[i]);
-  if (rc != SQLITE_OK) {
-    return rc;
+  if (rc == SQLITE_OK) {
+    sqlite3_stmt *stmt = p->stmtDiskannNodeWrite[i];
+    sqlite3_bind_int64(stmt, 1, rowid);
+    sqlite3_bind_blob(stmt, 2, validity, validitySize, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 3, neighborIds, neighborIdsSize, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 4, qvecs, qvecsSize, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    if (rc == SQLITE_DONE) {
+      return SQLITE_OK;
+    }
+    rc = vec0_error_rc(rc);
   }
-  sqlite3_stmt *stmt = p->stmtDiskannNodeWrite[i];
-  sqlite3_bind_int64(stmt, 1, rowid);
-  sqlite3_bind_blob(stmt, 2, validity, validitySize, SQLITE_STATIC);
-  sqlite3_bind_blob(stmt, 3, neighborIds, neighborIdsSize, SQLITE_STATIC);
-  sqlite3_bind_blob(stmt, 4, qvecs, qvecsSize, SQLITE_STATIC);
-  rc = sqlite3_step(stmt);
-  sqlite3_reset(stmt);
-  sqlite3_clear_bindings(stmt);
-  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not write node %lld of the DiskANN graph of vector "
+                   "column %d: %s",
+                   rowid, i, sqlite3_errmsg(p->db));
+  }
+  return rc;
 }
 
 /**
  * Reads the vector of row rowid in column i into a buffer to be freed with
  * sqlite3_free(), and its size into *outVectorSize unless that is NULL.
- * Returns SQLITE_EMPTY when the column has no vector with that rowid.
+ * Returns SQLITE_EMPTY when the column has no vector with that rowid, and
+ * otherwise sets a message naming the vector when it cannot read it.
  */
 static int diskann_vector_read(vec0_vtab *p, int i, i64 rowid, void **outVector,
                                int *outVectorSize) {
+  sqlite3_stmt *stmt = NULL;
   int rc = diskann_stmt(p, &p->stmtDiskannVectorRead[i],
                         "SELECT vector FROM \"%w\".\"%w\" WHERE rowid = ?",
                         p->shadowDiskannVectorsNames[i]);
   if (rc != SQLITE_OK) {
-    return rc;
+    goto failed;
   }
-  sqlite3_stmt *stmt = p->stmtDiskannVectorRead[i];
+  stmt = p->stmtDiskannVectorRead[i];
   sqlite3_bind_int64(stmt, 1, rowid);
   rc = sqlite3_step(stmt);
-  if (rc != SQLITE_ROW) {
-    rc = rc == SQLITE_DONE ? SQLITE_EMPTY : vec0_error_rc(rc);
+  if (rc == SQLITE_DONE) {
+    rc = SQLITE_EMPTY;
     goto done;
+  }
+  if (rc != SQLITE_ROW) {
+    rc = vec0_error_rc(rc);
+    goto failed;
   }
   const void *blob = sqlite3_column_blob(stmt, 0);
   int size = sqlite3_column_bytes(stmt, 0);
@@ -11043,15 +11100,26 @@ static int diskann_vector_read(vec0_vtab *p, int i, i64 rowid, void **outVector,
     *outVectorSize = size;
   }
   rc = SQLITE_OK;
+  goto done;
 
+failed:
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not read the DiskANN vector of row %lld in vector "
+                   "column %d: %s",
+                   rowid, i, sqlite3_errmsg(p->db));
+  }
 done:
-  sqlite3_reset(stmt);
-  sqlite3_clear_bindings(stmt);
+  if (stmt) {
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+  }
   return rc;
 }
 
 /**
- * Writes the vector of row rowid in column i, replacing the row it had.
+ * Writes the vector of row rowid in column i, replacing the row it had, and
+ * sets a message naming the vector when it cannot.
  */
 static int diskann_vector_write(vec0_vtab *p, int i, i64 rowid,
                                 const void *vector) {
@@ -11059,18 +11127,27 @@ static int diskann_vector_write(vec0_vtab *p, int i, i64 rowid,
                         "INSERT OR REPLACE INTO \"%w\".\"%w\" (rowid, vector) "
                         "VALUES (?, ?)",
                         p->shadowDiskannVectorsNames[i]);
-  if (rc != SQLITE_OK) {
-    return rc;
+  if (rc == SQLITE_OK) {
+    sqlite3_stmt *stmt = p->stmtDiskannVectorWrite[i];
+    sqlite3_bind_int64(stmt, 1, rowid);
+    sqlite3_bind_blob(stmt, 2, vector,
+                      (int)vector_column_byte_size(p->vector_columns[i]),
+                      SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    if (rc == SQLITE_DONE) {
+      return SQLITE_OK;
+    }
+    rc = vec0_error_rc(rc);
   }
-  sqlite3_stmt *stmt = p->stmtDiskannVectorWrite[i];
-  sqlite3_bind_int64(stmt, 1, rowid);
-  sqlite3_bind_blob(stmt, 2, vector,
-                    (int)vector_column_byte_size(p->vector_columns[i]),
-                    SQLITE_STATIC);
-  rc = sqlite3_step(stmt);
-  sqlite3_reset(stmt);
-  sqlite3_clear_bindings(stmt);
-  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not write the DiskANN vector of row %lld in vector "
+                   "column %d: %s",
+                   rowid, i, sqlite3_errmsg(p->db));
+  }
+  return rc;
 }
 
 struct Vec0DiskannCandidate {
@@ -11762,6 +11839,21 @@ cleanup:
 }
 
 /**
+ * Sets the message for a statement on the DiskANN buffer of column i that
+ * failed with rc: what it could not do to the buffer, as "add a row to", and
+ * SQLite's reason, unless an interrupt stopped it. Returns rc.
+ */
+static int diskann_buffer_failed(vec0_vtab *p, int i, const char *zWhat,
+                                 int rc) {
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not %s the DiskANN buffer of vector column %d: %s",
+                   zWhat, i, sqlite3_errmsg(p->db));
+  }
+  return rc;
+}
+
+/**
  * Links the vectors waiting in _diskann_bufferNN of column i into the graph,
  * in rowid order, and empties the buffer.
  */
@@ -11776,7 +11868,7 @@ static int diskann_flush_buffer(vec0_vtab *p, int i) {
   int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
-    return rc;
+    return diskann_buffer_failed(p, i, "read", rc);
   }
   size_t size = vector_column_byte_size(p->vector_columns[i]);
   int stepRc = SQLITE_DONE;
@@ -11795,7 +11887,7 @@ static int diskann_flush_buffer(vec0_vtab *p, int i) {
     return rc;
   }
   if (stepRc != SQLITE_DONE) {
-    return vec0_error_rc(stepRc);
+    return diskann_buffer_failed(p, i, "read", vec0_error_rc(stepRc));
   }
 
   zSql = sqlite3_mprintf("DELETE FROM \"%w\".\"%w\"", p->schemaName,
@@ -11806,11 +11898,13 @@ static int diskann_flush_buffer(vec0_vtab *p, int i) {
   rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
-    return rc;
+    return diskann_buffer_failed(p, i, "empty", rc);
   }
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
-  return rc == SQLITE_DONE ? SQLITE_OK : vec0_error_rc(rc);
+  return rc == SQLITE_DONE
+             ? SQLITE_OK
+             : diskann_buffer_failed(p, i, "empty", vec0_error_rc(rc));
 }
 
 /**
@@ -11839,7 +11933,7 @@ static int diskann_insert(vec0_vtab *p, int i, i64 rowid, const void *vector) {
   rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
-    return rc;
+    return diskann_buffer_failed(p, i, "add a row to", rc);
   }
   sqlite3_bind_int64(stmt, 1, rowid);
   sqlite3_bind_blob(stmt, 2, vector,
@@ -11848,7 +11942,7 @@ static int diskann_insert(vec0_vtab *p, int i, i64 rowid, const void *vector) {
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
   if (rc != SQLITE_DONE) {
-    return vec0_error_rc(rc);
+    return diskann_buffer_failed(p, i, "add a row to", vec0_error_rc(rc));
   }
 
   zSql = sqlite3_mprintf("SELECT count(*) FROM \"%w\".\"%w\"", p->schemaName,
@@ -11859,12 +11953,12 @@ static int diskann_insert(vec0_vtab *p, int i, i64 rowid, const void *vector) {
   rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
-    return rc;
+    return diskann_buffer_failed(p, i, "count", rc);
   }
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_ROW) {
     sqlite3_finalize(stmt);
-    return vec0_error_rc(rc);
+    return diskann_buffer_failed(p, i, "count", vec0_error_rc(rc));
   }
   i64 buffered = sqlite3_column_int64(stmt, 0);
   sqlite3_finalize(stmt);
@@ -11983,7 +12077,7 @@ static int diskann_scrub_deleted_rowid(vec0_vtab *p, int i, i64 deleted_rowid) {
   rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
-    goto cleanup;
+    goto scan_failed;
   }
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     const u8 *validity = sqlite3_column_blob(stmt, 1);
@@ -12012,7 +12106,7 @@ static int diskann_scrub_deleted_rowid(vec0_vtab *p, int i, i64 deleted_rowid) {
   }
   if (rc != SQLITE_DONE) {
     rc = vec0_error_rc(rc);
-    goto cleanup;
+    goto scan_failed;
   }
   sqlite3_finalize(stmt);
   stmt = NULL;
@@ -12045,6 +12139,14 @@ static int diskann_scrub_deleted_rowid(vec0_vtab *p, int i, i64 deleted_rowid) {
     sqlite3_free(qvecs);
   }
 
+  goto cleanup;
+
+scan_failed:
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not scan the DiskANN graph of vector column %d: %s",
+                   i, sqlite3_errmsg(p->db));
+  }
 cleanup:
   sqlite3_finalize(stmt);
   array_cleanup(&dirty);
@@ -12072,7 +12174,7 @@ static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
     rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
     sqlite3_free(zSql);
     if (rc != SQLITE_OK) {
-      return rc;
+      return diskann_buffer_failed(p, i, "read", rc);
     }
     sqlite3_bind_int64(stmt, 1, rowid);
     rc = sqlite3_step(stmt);
@@ -12087,7 +12189,7 @@ static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
                                 p->shadowDiskannVectorsNames[i], rowid);
     }
     if (rc != SQLITE_DONE) {
-      return vec0_error_rc(rc);
+      return diskann_buffer_failed(p, i, "read", vec0_error_rc(rc));
     }
   }
 
@@ -12145,18 +12247,24 @@ static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
     }
     rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
     sqlite3_free(zSql);
-    if (rc != SQLITE_OK) {
-      return rc;
+    i64 next = 0;
+    if (rc == SQLITE_OK) {
+      rc = sqlite3_step(stmt);
+      if (rc == SQLITE_ROW) {
+        next = sqlite3_column_int64(stmt, 0);
+      }
+      sqlite3_finalize(stmt);
     }
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-      i64 next = sqlite3_column_int64(stmt, 0);
-      sqlite3_finalize(stmt);
-      rc = diskann_medoid_set(p, i, next, 0);
+    if (rc == SQLITE_ROW || rc == SQLITE_DONE) {
+      rc = diskann_medoid_set(p, i, next, rc == SQLITE_DONE);
     } else {
-      sqlite3_finalize(stmt);
-      rc = rc == SQLITE_DONE ? diskann_medoid_set(p, i, 0, 1)
-                             : vec0_error_rc(rc);
+      rc = vec0_error_rc(rc);
+      if (rc != SQLITE_INTERRUPT) {
+        vtab_set_error(&p->base,
+                       "could not choose a new DiskANN medoid for vector "
+                       "column %d: %s",
+                       i, sqlite3_errmsg(p->db));
+      }
     }
   }
   if (rc == SQLITE_OK) {
@@ -12264,6 +12372,7 @@ static int diskann_knn(vec0_vtab *p,
     rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
     sqlite3_free(zSql);
     if (rc != SQLITE_OK) {
+      rc = diskann_buffer_failed(p, vectorColumnIdx, "read", rc);
       goto cleanup;
     }
     size_t size = vector_column_byte_size(*vector_column);
@@ -12287,7 +12396,7 @@ static int diskann_knn(vec0_vtab *p,
       }
     }
     if (rc != SQLITE_DONE) {
-      rc = vec0_error_rc(rc);
+      rc = diskann_buffer_failed(p, vectorColumnIdx, "read", vec0_error_rc(rc));
       goto cleanup;
     }
     rc = SQLITE_OK;
