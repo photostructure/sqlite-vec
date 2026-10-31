@@ -1790,6 +1790,39 @@ def test_diskann_unreadable_buffer_errors(db):
         ).fetchall()
 
 
+def test_shadow_diskann_tables(db):
+    # As in test_shadow_rescore_tables (test-rescore.py): after VACUUM, SQLite
+    # asks xShadowName about every backing table, and a name that only looks
+    # like a DiskANN table's stays an ordinary table. Upstream's xShadowName
+    # names none of the three.
+    db.execute("""
+        CREATE VIRTUAL TABLE v USING vec0(
+            a float[8] INDEXED BY diskann(neighbor_quantizer=binary), b float[1]
+        )
+    """)
+    db.execute("INSERT INTO v(rowid, a, b) VALUES (1, ?, '[1]')", [_f32([1.0] * 8)])
+    db.commit()
+    for name in ["v_vectors", "v_vectors0", "v_diskann_nodes000", "v_diskann_buffer"]:
+        db.execute(f"CREATE TABLE {name}(x)")
+    db.execute("VACUUM")
+    types = {
+        row[0]: row[1]
+        for row in db.execute(
+            "SELECT name, type FROM pragma_table_list WHERE schema = 'main'"
+        )
+        if row[0].startswith(("v_vectors", "v_diskann"))
+    }
+    assert types == {
+        "v_vectors00": "shadow",
+        "v_diskann_nodes00": "shadow",
+        "v_diskann_buffer00": "shadow",
+        "v_vectors": "table",
+        "v_vectors0": "table",
+        "v_diskann_nodes000": "table",
+        "v_diskann_buffer": "table",
+    }
+
+
 def test_diskann_point_query_for_a_missing_rowid(db):
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
