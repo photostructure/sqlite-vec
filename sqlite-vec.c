@@ -2869,8 +2869,9 @@ struct Vec0DiskannConfig {
   // the search list size of queries and of inserts; 0 means search_list_size
   int search_list_size_search;
   int search_list_size_insert;
-  // how far an edge must reach past the edges already kept for RobustPrune to
-  // keep it
+  // RobustPrune drops a candidate once alpha times its distance to a neighbor
+  // already kept is at most its distance to the node, so a larger alpha keeps
+  // more edges, and longer ones
   f32 alpha;
   // with N > 0, inserted vectors wait in _diskann_bufferNN and join the graph
   // N at a time
