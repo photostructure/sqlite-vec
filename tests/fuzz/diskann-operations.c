@@ -58,7 +58,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     switch (op) {
       case 0: {
-        /* INSERT: consume 32 bytes for 8 floats, or use what's left */
+        /* INSERT: consume up to 8 bytes, one per float */
         float vec[8] = {0};
         for (int j = 0; j < 8 && i < size; j++, i++) {
           vec[j] = (float)((int8_t)data[i]) / 10.0f;

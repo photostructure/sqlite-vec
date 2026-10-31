@@ -11,12 +11,12 @@
  * call it directly with fuzz-controlled inputs. This gives the fuzzer
  * maximum speed (no SQLite overhead) to explore:
  *
- *   - alpha boundary: alpha=0 (prunes nothing), alpha=very large (prunes all)
+ *   - alpha boundary: alpha=0 keeps only the nearest candidate, and a large
+ *     alpha prunes only candidates almost on top of a kept one
  *   - max_neighbors = 0, 1, num_candidates, > num_candidates
- *   - num_candidates = 0, 1, large
- *   - Distance matrices with: all zeros, all same, negative values, NaN, Inf
+ *   - num_candidates from 0 to 32
+ *   - Distances from 0 to 25.5: all zeros, all the same, or mixed
  *   - Non-symmetric distance matrices (should still work)
- *   - Memory: large num_candidates to stress malloc
  *
  * Key code paths:
  *   - diskann_prune_select alpha-pruning loop
@@ -32,13 +32,7 @@
 #include "sqlite-vec.h"
 #include "sqlite3.h"
 #include <assert.h>
-
-/* Declare the test-exposed function.
- * diskann_prune_select is not static -- it's a public symbol. */
-extern int diskann_prune_select(const float *p_distances, int num_candidates,
-                                float alpha, int max_neighbors,
-                                float (*distance)(void *ctx, int a, int b),
-                                void *ctx, int *outSelected, int *outCount);
+#include "../sqlite-vec-internal.h"
 
 struct matrix {
   const float *distances;

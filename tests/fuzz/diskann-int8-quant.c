@@ -13,7 +13,6 @@
  * Also exercises int8 distance functions:
  *   - distance_l2_sqr_int8: accumulates squared differences, possible overflow
  *   - distance_cosine_int8: dot product with normalization
- *   - distance_l1_int8: absolute differences
  *
  * This fuzzer also tests the cosine distance metric path which the
  * other fuzzers (using L2 default) don't cover.

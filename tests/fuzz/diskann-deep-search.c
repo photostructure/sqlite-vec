@@ -2,8 +2,8 @@
  * Fuzz target for DiskANN greedy beam search deep paths.
  *
  * Builds a graph with enough nodes to force multi-hop traversal, then
- * uses fuzz data to control: query vector values, k, search_list_size
- * overrides, and interleaved insert/delete/query sequences that stress
+ * uses fuzz data to control: query vector values, k, search_list_size,
+ * and interleaved insert/delete/query sequences that stress
  * the candidate list growth, visited set hash collisions, and the
  * re-ranking logic.
  *
@@ -12,7 +12,6 @@
  *   - diskann_visited_set (hash collisions, capacity)
  *   - diskann_search (full beam search loop, re-ranking with exact dist)
  *   - diskann_distance_quantized (both binary and int8)
- *   - Buffer merge in diskann_knn
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -161,7 +160,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         while (sqlite3_step(stmtKnn) == SQLITE_ROW) {}
         break;
       }
-      case 4: { /* INSERT duplicate rowid (triggers OR REPLACE path) */
+      case 4: { /* INSERT a low rowid, which fails if that row exists */
         int64_t rowid = (int64_t)(param % 32) + 1;
         for (int j = 0; j < dims; j++) {
           vec[j] = (float)(param + j) / 50.0f;

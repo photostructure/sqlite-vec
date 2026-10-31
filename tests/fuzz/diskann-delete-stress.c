@@ -20,7 +20,7 @@
  *   - diskann_delete -> diskann_repair_reverse_edges
  *   - diskann_delete's choice of a new medoid
  *   - diskann_node_clear_neighbor
- *   - Interaction between delete and concurrent search
+ *   - Deletes interleaved with KNN queries
  */
 #include <stdint.h>
 #include <stddef.h>

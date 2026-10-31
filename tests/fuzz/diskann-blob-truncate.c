@@ -18,7 +18,8 @@
  *
  * Key code paths targeted:
  *   - diskann_node_read with mismatched blob sizes
- *   - diskann_validity_get / diskann_neighbor_id_get on truncated blobs
+ *   - diskann_validity_get / diskann_neighbor_id_get on correctly sized blobs
+ *     of garbage
  *   - diskann_add_reverse_edge reading corrupted neighbor data
  *   - diskann_repair_reverse_edges traversing corrupted neighbor lists
  *   - diskann_search iterating neighbors from corrupted blobs
