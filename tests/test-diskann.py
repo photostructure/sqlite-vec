@@ -632,49 +632,48 @@ def test_diskann_create_error_mixed_search_list_size(db):
 
 
 def test_diskann_command_search_list_size(db):
-    """Runtime search_list_size override via command insert."""
+    """search_list_size=N changes a query's search on a table with no split size."""
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
-            emb float[64] INDEXED BY diskann(neighbor_quantizer=binary)
+            emb float[16] INDEXED BY diskann(neighbor_quantizer=binary)
         )
     """)
-    import struct, random
+    for rowid, vec in _random_rows(42, 200, 16).items():
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32(vec)])
+    rng = random.Random(43)
+    queries = [_f32([rng.uniform(-1, 1) for _ in range(16)]) for _ in range(10)]
 
-    random.seed(42)
-    for i in range(20):
-        vec = struct.pack("64f", *[random.random() for _ in range(64)])
-        db.execute("INSERT INTO t(emb) VALUES (?)", [vec])
+    def knn():
+        sql = "SELECT rowid FROM t WHERE emb MATCH ? AND k = 10"
+        return [[r[0] for r in db.execute(sql, [q])] for q in queries]
 
-    # Query with default search_list_size
-    query = struct.pack("64f", *[random.random() for _ in range(64)])
-    results_before = db.execute(
-        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k = 5", [query]
-    ).fetchall()
-    assert len(results_before) == 5
+    before = knn()
+    db.execute("INSERT INTO t(t) VALUES ('search_list_size=1')")
+    assert knn() != before
 
-    # Override search_list_size_search at runtime
-    db.execute("INSERT INTO t(t) VALUES ('search_list_size_search=256')")
 
-    # Query should still work
-    results_after = db.execute(
-        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k = 5", [query]
-    ).fetchall()
-    assert len(results_after) == 5
-
-    # Override search_list_size_insert at runtime
-    db.execute("INSERT INTO t(t) VALUES ('search_list_size_insert=32')")
-
-    # Inserts should still work
-    vec = struct.pack("64f", *[random.random() for _ in range(64)])
-    db.execute("INSERT INTO t(emb) VALUES (?)", [vec])
-
-    # Override unified search_list_size
-    db.execute("INSERT INTO t(t) VALUES ('search_list_size=64')")
-
-    results_final = db.execute(
-        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k = 5", [query]
-    ).fetchall()
-    assert len(results_final) == 5
+def test_diskann_command_search_list_size_insert(db):
+    """
+    After search_list_size_insert=N, inserts build the graph a table created
+    with search_list_size_insert=N builds.
+    """
+    for name, option in [("t", ""), ("r", ", search_list_size_insert=2")]:
+        db.execute(f"""
+            CREATE VIRTUAL TABLE {name} USING vec0(
+                emb float[16] INDEXED BY diskann(neighbor_quantizer=binary{option})
+            )
+        """)
+    db.execute("INSERT INTO t(t) VALUES ('search_list_size_insert=2')")
+    for rowid, vec in _random_rows(44, 200, 16).items():
+        for name in ("t", "r"):
+            db.execute(
+                f"INSERT INTO {name}(rowid, emb) VALUES (?, ?)", [rowid, _f32(vec)]
+            )
+    nodes = "SELECT * FROM {}_diskann_nodes00 ORDER BY rowid"
+    assert (
+        db.execute(nodes.format("t")).fetchall()
+        == db.execute(nodes.format("r")).fetchall()
+    )
 
 
 def test_diskann_command_search_list_size_error(db):
@@ -715,17 +714,17 @@ def test_diskann_create_with_auxiliary_column(db):
 
 def test_diskann_create_error_with_metadata_column(db):
     """DiskANN tables should not support metadata columns."""
-    result = exec(
-        db,
-        """
-        CREATE VIRTUAL TABLE t USING vec0(
-            emb float[64] INDEXED BY diskann(neighbor_quantizer=binary),
-            metadata_col integer metadata
-        )
-    """,
-    )
-    assert "error" in result
-    assert "metadata" in result["message"].lower() or "Metadata" in result["message"]
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="^vec0 constructor error: Metadata columns are not supported "
+        "with DiskANN-indexed vector columns$",
+    ):
+        db.execute("""
+            CREATE VIRTUAL TABLE t USING vec0(
+                emb float[64] INDEXED BY diskann(neighbor_quantizer=binary),
+                metadata_col integer
+            )
+        """)
 
 
 def test_diskann_create_error_with_partition_key(db):
@@ -762,7 +761,7 @@ def test_diskann_insert_no_rowid(db):
 
 
 def test_diskann_insert_large_batch(db):
-    """INSERT 500+ vectors, verify all are queryable via KNN."""
+    """INSERT 500 vectors, and each one's own vector finds it via KNN."""
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
             emb float[16] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=16)
@@ -790,6 +789,12 @@ def test_diskann_insert_large_batch(db):
     distances = [r[1] for r in rows]
     for i in range(len(distances) - 1):
         assert distances[i] <= distances[i + 1]
+
+    for rowid, vector in db.execute("SELECT rowid, vector FROM t_vectors00"):
+        found = db.execute(
+            "SELECT rowid FROM t WHERE emb MATCH ? AND k = 1", [vector]
+        ).fetchone()[0]
+        assert found == rowid
 
 
 def test_diskann_insert_zero_vector(db):
@@ -863,16 +868,14 @@ def test_diskann_insert_int8_quantizer_knn(db):
 
 
 def test_diskann_delete_nonexistent(db):
-    """DELETE of a nonexistent rowid should either be a no-op or return an error, not crash."""
+    """DELETE of a rowid the table does not have deletes nothing."""
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
             emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
         )
     """)
     db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1.0] * 8)])
-    # Deleting a nonexistent rowid may error but should not crash
-    result = exec(db, "DELETE FROM t WHERE rowid = 999")
-    # Whether it succeeds or errors, the existing row should still be there
+    db.execute("DELETE FROM t WHERE rowid = 999")
     assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 1
 
 
