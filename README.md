@@ -427,8 +427,11 @@ where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
   alike, or `search_list_size_search` and `search_list_size_insert` set the two
   apart. A query keeps at least `k` rows. The commands `search_list_size=N`,
   `search_list_size_search=N` and `search_list_size_insert=N` set them for every
-  DiskANN column, for the connection that runs them, as in
-  `insert into vec_diskann(vec_diskann) values ('search_list_size_search=256')`.
+  DiskANN column, as in
+  `insert into vec_diskann(vec_diskann) values ('search_list_size_search=256')`,
+  for the connection that runs them until SQLite reconnects the table, as after
+  `VACUUM`, `ALTER TABLE ... RENAME`, or another connection's schema change. A
+  table with no DiskANN column has no such command.
 - With `buffer_threshold=N`, inserted rows wait in a buffer and join the graph
   `N` at a time. A KNN query compares every row in the buffer by its exact
   distance.

@@ -1951,10 +1951,14 @@ def test_diskann_create_option_must_be_whole(db, option):
 @pytest.mark.parametrize(
     "command, message",
     [
-        ("search_list_size=12abc", "search_list_size must be >= 1"),
-        ("search_list_size=", "search_list_size must be >= 1"),
-        ("search_list_size_search= 64", "search_list_size_search must be >= 1"),
-        ("search_list_size_insert=0", "search_list_size_insert must be >= 1"),
+        ("search_list_size=12abc", "search_list_size must be a whole number"),
+        ("search_list_size=", "search_list_size must be a whole number"),
+        ("search_list_size_search= 64", "search_list_size_search must be a whole"),
+        ("search_list_size_insert=0", "search_list_size_insert must be a whole"),
+        (
+            "search_list_size=3000000000",
+            "^search_list_size must be a whole number from 1 to 2147483647$",
+        ),
         ("search_list_sizes=64", "unknown vec0 command"),
     ],
 )
@@ -1966,6 +1970,65 @@ def test_diskann_command_value_must_be_digits(db, command, message):
     """)
     with pytest.raises(sqlite3.OperationalError, match=message):
         db.execute("INSERT INTO t(t) VALUES (?)", [command])
+
+
+@pytest.mark.parametrize(
+    "column", ["v float[8]", "v float[8] INDEXED BY rescore(quantizer=bit)"]
+)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "search_list_size=64",
+        "search_list_size_search=64",
+        "search_list_size_insert=64",
+        "search_list_size=abc",
+    ],
+)
+def test_diskann_commands_are_unknown_without_a_diskann_column(db, column, command):
+    """As on main and upstream, a table with no DiskANN column has no such command."""
+    db.execute(f"CREATE VIRTUAL TABLE t USING vec0({column})")
+    with pytest.raises(
+        sqlite3.OperationalError, match=f"^unknown vec0 command: '{command}'$"
+    ):
+        db.execute("INSERT INTO t(t) VALUES (?)", [command])
+
+
+def test_diskann_command_sets_every_diskann_column(db):
+    """
+    search_list_size_search=N changes the searches of both DiskANN columns
+    as a CREATE with it does; upstream's command sets only the first.
+    """
+    options = "neighbor_quantizer=binary, n_neighbors=8"
+    db.execute(f"""
+        CREATE VIRTUAL TABLE t USING vec0(
+            a float[16] INDEXED BY diskann({options}, search_list_size=4),
+            b float[16] INDEXED BY diskann({options}, search_list_size=4)
+        )
+    """)
+    db.execute(f"""
+        CREATE VIRTUAL TABLE r USING vec0(
+            a float[16] INDEXED BY diskann({options}, search_list_size_insert=4,
+                                           search_list_size_search=800)
+        )
+    """)
+    for rowid, vec in _random_rows(5, 800, 16).items():
+        db.execute(
+            "INSERT INTO t(rowid, a, b) VALUES (?, ?, ?)", [rowid, _f32(vec), _f32(vec)]
+        )
+        db.execute("INSERT INTO r(rowid, a) VALUES (?, ?)", [rowid, _f32(vec)])
+    rng = random.Random(6)
+    queries = [_f32([rng.uniform(-1, 1) for _ in range(16)]) for _ in range(10)]
+
+    def knn(table, column):
+        sql = f"SELECT rowid FROM {table} WHERE {column} MATCH ? AND k = 10"
+        return [[r[0] for r in db.execute(sql, [q])] for q in queries]
+
+    before = knn("t", "b")
+    db.execute("INSERT INTO t(t) VALUES ('search_list_size_search=800')")
+    want = knn("r", "a")
+    assert knn("t", "a") == want
+    assert knn("t", "b") == want
+    assert before != want
 
 
 def test_diskann_optimize_beside_a_flat_column(db):

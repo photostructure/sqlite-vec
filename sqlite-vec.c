@@ -12302,6 +12302,18 @@ static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
 }
 
 /**
+ * Returns 1 when a vector column of the table is indexed by diskann().
+ */
+static int vec0_any_column_diskann(vec0_vtab *p) {
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_DISKANN) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/**
  * Returns 1 when every vector column of the table is indexed by diskann(),
  * so the table keeps no chunks.
  */
@@ -12482,12 +12494,17 @@ cleanup:
 /**
  * The commands `search_list_size=N`, `search_list_size_search=N` and
  * `search_list_size_insert=N` set those options of every column indexed by
- * diskann() for this connection, in place of the ones its CREATE gave.
- * Returns SQLITE_EMPTY for any other command.
+ * diskann(), in place of the ones its CREATE gave, until SQLite reconnects the
+ * table, as after `VACUUM`, `ALTER TABLE ... RENAME`, or another connection's
+ * schema change. Returns SQLITE_EMPTY for any other command, and for these on
+ * a table with no such column, as upstream does.
  */
 static int diskann_handle_command(vec0_vtab *p, const char *command) {
   static const char *azKey[] = {"search_list_size=", "search_list_size_search=",
                                 "search_list_size_insert="};
+  if (!vec0_any_column_diskann(p)) {
+    return SQLITE_EMPTY;
+  }
   int key = -1;
   for (int j = 0; j < (int)countof(azKey); j++) {
     if (strncmp(command, azKey[j], strlen(azKey[j])) == 0) {
@@ -12503,8 +12520,8 @@ static int diskann_handle_command(vec0_vtab *p, const char *command) {
   long value = strtol(zValue, &zEnd, 10);
   if (!(*zValue >= '0' && *zValue <= '9') || *zEnd != '\0' || errno == ERANGE ||
       value < 1 || value > INT_MAX) {
-    vtab_set_error(&p->base, "%.*s must be >= 1", (int)strlen(azKey[key]) - 1,
-                   azKey[key]);
+    vtab_set_error(&p->base, "%.*s must be a whole number from 1 to %d",
+                   (int)strlen(azKey[key]) - 1, azKey[key], INT_MAX);
     return SQLITE_ERROR;
   }
   for (int i = 0; i < p->numVectorColumns; i++) {
