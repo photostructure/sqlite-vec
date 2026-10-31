@@ -419,8 +419,9 @@ where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
 
 - `neighbor_quantizer=binary` keeps a bit for each value > 0, and needs a number
   of dimensions divisible by 8. `neighbor_quantizer=int8` keeps a byte per
-  dimension: a `float` value in [-1, 1] mapped onto the 256 values of an int8,
-  and an `int8` column's own values.
+  dimension: for a `float` column each value mapped as rescore's
+  `quantizer=int8` maps it, -1 to -128 and 1 to 126, with results clamped to
+  [-128, 127], and for an `int8` column its own values.
 - `n_neighbors` is 72 unless the column sets it, a multiple of 8 up to 256.
 - `search_list_size` is 128 unless the column sets it, for inserts and queries
   alike, or `search_list_size_search` and `search_list_size_insert` set the two

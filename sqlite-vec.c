@@ -10701,9 +10701,11 @@ void diskann_node_clear_neighbor(u8 *validity, u8 *neighbor_ids, u8 *qvecs,
 /**
  * Writes the quantized form of a float32 vector to out, which holds
  * diskann_quantized_vector_byte_size() bytes: under binary a bit per
- * dimension, set when the value is > 0; under int8 [-1, 1] mapped onto
- * [-128, 127] in steps of 2/255, truncating toward zero, with values outside
- * it clamped and NaN as 127, as rescore's int8 quantizer does.
+ * dimension, set when the value is > 0; under int8 a byte per dimension, as
+ * rescore's int8 quantizer writes it: v maps to (v + 1) / (2/255) - 128,
+ * truncated toward zero, so -1 to -128, 0 to 0, and 1, which float32 rounding
+ * puts just below 127, to 126. Results outside [-128, 127] are clamped, and
+ * NaN becomes 127.
  */
 int diskann_quantize_vector(const f32 *src, size_t dimensions,
                             enum Vec0DiskannQuantizerType quantizer_type,
