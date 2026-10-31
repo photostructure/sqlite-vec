@@ -441,8 +441,9 @@ where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
   and a `bit` column cannot be indexed by DiskANN. Auxiliary columns work.
 - `UPDATE` of a DiskANN column's vector fails, since its row's links were
   chosen for the vector it has; delete the row and insert it again.
-- A `DELETE` links the row's neighbors to each other and reads every node of
-  the graph to remove the links to the row.
+- A `DELETE` gives each of the row's neighbors, in the slot that named the
+  row, one of the row's other neighbors it lacks, and reads every node of the
+  graph to remove the links to the row.
 
 ## Sponsors
 

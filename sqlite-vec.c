@@ -11989,10 +11989,12 @@ static int diskann_insert(vec0_vtab *p, int i, i64 rowid, const void *vector) {
 }
 
 /**
- * Repairs the graph of column i after node deleted_rowid goes, as LM-Delete,
- * Algorithm 3 in the LM-DiskANN paper, does for each of its neighbors: drops
- * the deleted node from the neighbor's slots and gives the freed slot the
- * first of the deleted node's other neighbors the neighbor lacks.
+ * Repairs the graph of column i after node deleted_rowid goes, more cheaply
+ * than LM-Delete (Algorithm 3 of the LM-DiskANN paper), which adds the deleted
+ * node's other neighbors to each of its neighbors and prunes. As upstream does,
+ * each of its neighbors drops it from the first slot naming it and gives that
+ * slot the first of the deleted node's other neighbors it lacks whose vector
+ * remains; diskann_scrub_deleted_rowid() clears the rest.
  */
 static int diskann_repair_reverse_edges(vec0_vtab *p, int i, i64 deleted_rowid,
                                         const i64 *deleted_neighbors,
