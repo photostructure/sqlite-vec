@@ -3308,9 +3308,10 @@ int vec0_parse_vector_column(const char *source, int source_length,
         return SQLITE_ERROR;
       }
     }
-    // `indexed by flat()` or `indexed by rescore(...)`. Connect matches the
-    // keywords by prefix, as upstream does at CREATE too, so a table upstream
-    // created as `index by f()` opens.
+    // `indexed by flat()`, `indexed by rescore(...)` or
+    // `indexed by diskann(...)`. Connect matches the keywords by prefix, as
+    // upstream does at CREATE too, so a table upstream created as
+    // `index by f()` opens.
     else if (vec0_token_is_keyword(&token, "indexed", strict)) {
       rc = vec0_scanner_next(&scanner, &token);
       if (rc != VEC0_TOKEN_RESULT_SOME ||
@@ -4647,9 +4648,10 @@ struct vec0_vtab {
   sqlite3_stmt *stmtRowidsGetChunkPosition;
 
 #if SQLITE_VEC_ENABLE_DISKANN
-  // Statements a graph search runs once per node it visits, for each vector
-  // column indexed by diskann(): reading a node's row of _diskann_nodesNN,
-  // writing it, and reading and writing a vector's row of _vectorsNN. Each is
+  // Statements of each vector column indexed by diskann(), run once per node
+  // a graph search visits (reading a node's row of _diskann_nodesNN and a
+  // vector's row of _vectorsNN), per node an insert or delete relinks
+  // (writing a node's row), and per insert (writing a vector's row). Each is
   // prepared on first use and reset after every use.
   sqlite3_stmt *stmtDiskannNodeRead[VEC0_MAX_VECTOR_COLUMNS];
   sqlite3_stmt *stmtDiskannNodeWrite[VEC0_MAX_VECTOR_COLUMNS];
@@ -6884,8 +6886,8 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
       if (!shadowNames[j]) {
         continue;
       }
-      // As upstream does, a missing rescore shadow table (j > 0) does not
-      // keep the table from dropping.
+      // As upstream does, a missing rescore or DiskANN shadow table (j > 0)
+      // does not keep the table from dropping.
       zSql = sqlite3_mprintf("DROP TABLE %s\"%w\".\"%w\"",
                              j > 0 ? "IF EXISTS " : "", p->schemaName,
                              shadowNames[j]);
@@ -12182,10 +12184,12 @@ cleanup:
 }
 
 /**
- * Removes row rowid from column i: from the buffer when it waits there, and
- * otherwise from the graph, whose neighbors of it are repaired, with a new
- * medoid when it was the medoid, any node of the graph left, and from
- * _vectorsNN.
+ * Removes row rowid from column i. A row waiting in the buffer leaves the
+ * buffer and _vectorsNN. A node of the graph has its neighbors repaired
+ * (diskann_repair_reverse_edges()), leaves _diskann_nodesNN and _vectorsNN,
+ * gives way as medoid to any node of the graph left, or to an empty graph,
+ * and has every slot that still names it cleared
+ * (diskann_scrub_deleted_rowid()).
  */
 static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
   struct VectorColumnDefinition *col = &p->vector_columns[i];
@@ -15863,9 +15867,8 @@ static int vec0Begin(sqlite3_vtab *pVTab) {
   UNUSED_PARAMETER(pVTab);
   return SQLITE_OK;
 }
-// A statement left prepared past the commit keeps sqlite3_close() (not _v2)
-// from closing the connection, so the commit finalizes every one the table
-// keeps. https://github.com/asg017/sqlite-vec/commit/fe94171
+// Finalize every statement the table caches when a transaction commits, as
+// upstream does since https://github.com/asg017/sqlite-vec/commit/fe94171
 static int vec0Sync(sqlite3_vtab *pVTab) {
   vec0_free_resources((vec0_vtab *)pVTab);
   return SQLITE_OK;

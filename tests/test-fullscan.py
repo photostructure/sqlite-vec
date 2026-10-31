@@ -105,7 +105,8 @@ def test_fullscan_errors_on_a_row_deleted_during_the_scan(db, column):
         db.execute("delete from v where rowid = 12")
         db.execute("insert into v(rowid, a) values (99, ?)", [_f32([99, 99])])
 
-    # Row 99 takes row 12's slot; the scan must not return its vector as row 12.
+    # In a flat or rescore column row 99 takes row 12's slot; the scan must not
+    # return its vector as row 12.
     with pytest.raises(sqlite3.OperationalError, match="rowid 12") as excinfo:
         _scan_around(db, column, write)
     assert excinfo.value.sqlite_errorname == "SQLITE_ERROR"
