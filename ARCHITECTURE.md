@@ -405,6 +405,9 @@ result in precision loss for very small distance differences.
 `WHERE (distance > 0.5) OR (distance = 0.5 AND rowid > 123)`. On a column indexed by
 `rescore()`, distance constraints filter only the `k * oversample` candidates (five times
 that with MMR, at most 4096), so paging with `distance > X` reaches at most that many rows.
+On a column indexed by `diskann()`, they filter only the rows the search found, the larger
+of the search list size and `k` (five times `k` with MMR, at most 4096) plus every row in
+the buffer, so paging reaches at most that many rows too.
 
 #### `VEC0_IDXSTR_KIND_KNN_MMR_LAMBDA` (`'#'`)
 

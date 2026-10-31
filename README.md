@@ -172,7 +172,7 @@ limit 3;
 
 **How vector search works:** The `MATCH` operator finds vectors similar to your query vector. In the example above, `sample_embedding MATCH '[0.5, ...]'` searches for vectors closest to `[0.5, ...]` and returns them ordered by distance (smallest = most similar).
 
-Under the hood, sqlite-vec stores vectors in fixed-size chunks and scans each chunk to find the top-K nearest results, using SIMD instructions (AVX on x86_64, NEON on ARM) to accelerate distance calculations. Results from each chunk are merged using a two-pointer technique to produce the final sorted output. This brute-force approach trades theoretical optimality for simplicity and reliability — no complex index structures to maintain or tune.
+Under the hood, a vector column without an `indexed by` clause stores its vectors in fixed-size chunks and scans each chunk to find the top-K nearest results, using SIMD instructions (AVX on x86_64, NEON on ARM) to accelerate distance calculations. Results from each chunk are merged using a two-pointer technique to produce the final sorted output. This brute-force search reads every vector and needs no index to maintain or tune; the [Rescore Index](#rescore-index) and [DiskANN Index](#diskann-index) sections describe the indexed alternatives.
 
 **Note:** All vector similarity queries require `LIMIT` or `k = ?` (where k is the number of nearest neighbors to return). This prevents accidentally returning too many results on large datasets, since finding all vectors within a distance threshold requires calculating distance to every vector in the table.
 
@@ -437,9 +437,12 @@ where sample_embedding match '[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]'
   distance.
 - With `rowid = ?` or `rowid in (...)`, a KNN query ranks the rows they name by
   their exact distances, without the graph.
-- Distance constraints apply to the exact distances of the rows the query
-  found, so a query with `distance > x` returns fewer than `k` rows when most of
-  them are nearer than `x`. MMR reranks them as it does any KNN query.
+- Distance constraints apply only to the rows the search found (the larger of
+  `search_list_size` and `k`, with `k` five times larger when `mmr_lambda` is
+  below 1, plus every row in the buffer), by their exact distances. A query with `distance > x`, as in cursor-based pagination,
+  returns fewer than `k` rows once fewer than `k` of them are farther than `x`,
+  so paging that way reaches at most that many rows, not every row. MMR reranks
+  them as it does any KNN query.
 - A table with a DiskANN column cannot have metadata or partition key columns,
   and a `bit` column cannot be indexed by DiskANN. Auxiliary columns work.
 - `UPDATE` of a DiskANN column's vector fails, since its row's links were
