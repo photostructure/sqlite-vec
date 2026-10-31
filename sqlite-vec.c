@@ -11592,7 +11592,9 @@ static int diskann_robust_prune(vec0_vtab *p, int i, i64 p_rowid,
       break;
     }
   }
-  if (num_candidates == 0) {
+  // `<= 0`, not `== 0`, so gcc -O3 can bound the memsets of the inlined
+  // diskann_prune_select(); with `== 0` it warns -Wstringop-overflow
+  if (num_candidates <= 0) {
     return SQLITE_OK;
   }
   for (int j = 1; j < num_candidates; j++) {
@@ -11616,29 +11618,28 @@ static int diskann_robust_prune(vec0_vtab *p, int i, i64 p_rowid,
     return SQLITE_NOMEM;
   }
   memset(vectors, 0, num_candidates * sizeof(void *));
-  // a candidate whose vector is gone is no candidate
-  int kept = 0;
+  // the search read every candidate's vector in this statement
   for (int j = 0; j < num_candidates; j++) {
-    rc = diskann_vector_read(p, i, candidates[j], &vectors[kept], NULL);
+    rc = diskann_vector_read(p, i, candidates[j], &vectors[j], NULL);
     if (rc == SQLITE_EMPTY) {
-      continue;
+      vtab_set_error(&p->base,
+                     "row %lld of vector column %d has no DiskANN vector",
+                     candidates[j], i);
+      rc = SQLITE_ERROR;
     }
     if (rc != SQLITE_OK) {
       goto cleanup;
     }
-    candidates[kept] = candidates[j];
-    candidate_distances[kept] = candidate_distances[j];
-    kept++;
   }
   struct DiskannPruneVectors ctx = {col, vectors};
   int count;
-  rc = diskann_prune_select(candidate_distances, kept, col->diskann.alpha,
-                            col->diskann.n_neighbors, diskann_prune_distance,
-                            &ctx, selected, &count);
+  rc = diskann_prune_select(candidate_distances, num_candidates,
+                            col->diskann.alpha, col->diskann.n_neighbors,
+                            diskann_prune_distance, &ctx, selected, &count);
   if (rc != SQLITE_OK) {
     goto cleanup;
   }
-  for (int j = 0; j < kept; j++) {
+  for (int j = 0; j < num_candidates; j++) {
     if (selected[j]) {
       outNeighborRowids[(*outNeighborCount)++] = candidates[j];
     }
@@ -11676,11 +11677,15 @@ static int diskann_write_pruned_neighbors(vec0_vtab *p, int i, i64 nodeRowid,
     rc = SQLITE_NOMEM;
     goto cleanup;
   }
-  for (int j = 0; j < neighborCount && j < cfg->n_neighbors; j++) {
+  // the prune read every neighbor's vector in this statement
+  for (int j = 0; j < neighborCount; j++) {
     void *vector = NULL;
     rc = diskann_vector_read(p, i, neighborRowids[j], &vector, NULL);
     if (rc == SQLITE_EMPTY) {
-      continue;
+      vtab_set_error(&p->base,
+                     "row %lld of vector column %d has no DiskANN vector",
+                     neighborRowids[j], i);
+      rc = SQLITE_ERROR;
     }
     if (rc != SQLITE_OK) {
       goto cleanup;
@@ -12135,9 +12140,13 @@ static int diskann_scrub_deleted_rowid(vec0_vtab *p, int i, i64 deleted_rowid) {
     int vs, nis, qs;
     rc = diskann_node_read(p, i, node, &validity, &vs, &neighborIds, &nis,
                            &qvecs, &qs);
+    // the scan above read this node
     if (rc == SQLITE_EMPTY) {
-      rc = SQLITE_OK;
-      continue;
+      vtab_set_error(&p->base,
+                     "node %lld of the DiskANN graph of vector column %d is "
+                     "missing",
+                     node, i);
+      rc = SQLITE_ERROR;
     }
     if (rc != SQLITE_OK) {
       break;
