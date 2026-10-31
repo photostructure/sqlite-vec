@@ -1636,6 +1636,40 @@ def test_diskann_finds_neighbors_when_exact_distances_exceed_quantized_ones(db):
     assert found >= 120
 
 
+def test_diskann_insert_links_to_a_buffered_medoid(db):
+    """
+    Upstream's delete can make a row still in the buffer, with no node, the
+    medoid. An insert whose row flushes before it then links to the medoid;
+    upstream's build accepts it, and so does this one.
+    """
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(
+                neighbor_quantizer=binary, n_neighbors=8, buffer_threshold=2
+            )
+        )
+    """)
+    for rowid in (10, 11, 20):
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([rowid / 10] * 8)]
+        )
+    db.execute("UPDATE t_info SET value = 20 WHERE key = 'diskann_medoid_00'")
+    db.execute("INSERT INTO t(rowid, emb) VALUES (5, ?)", [_f32([0.5] * 8)])
+    nodes = db.execute("SELECT rowid FROM t_diskann_nodes00 ORDER BY rowid")
+    assert [r[0] for r in nodes] == [5, 10, 11, 20]
+    assert db.execute("SELECT count(*) FROM t_diskann_buffer00").fetchone()[0] == 0
+    validity, ids = db.execute(
+        "SELECT neighbors_validity, neighbor_ids FROM t_diskann_nodes00"
+        " WHERE rowid = 5"
+    ).fetchone()
+    neighbors = [
+        rowid
+        for slot, rowid in enumerate(struct.unpack("8q", ids))
+        if validity[0] >> slot & 1
+    ]
+    assert neighbors == [20]
+
+
 @pytest.mark.parametrize("blob", [b"", b"\x00" * 4])
 def test_diskann_corrupt_buffer_row_errors(db, blob):
     """A buffered vector of the wrong size fails the flush and a KNN query."""

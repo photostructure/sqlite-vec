@@ -11709,9 +11709,9 @@ cleanup:
 
 /**
  * Makes target_rowid, whose vector is target_vector, a neighbor of node
- * node_rowid of column i. A node with every slot taken keeps the nearer of
- * the target and its farthest neighbor by quantized distance, which reads no
- * neighbor's vector.
+ * node_rowid of column i, unless node_rowid has no node. A node with every
+ * slot taken keeps the nearer of the target and its farthest neighbor by
+ * quantized distance, which reads no neighbor's vector.
  */
 static int diskann_add_reverse_edge(vec0_vtab *p, int i, i64 node_rowid,
                                     i64 target_rowid,
@@ -11725,12 +11725,12 @@ static int diskann_add_reverse_edge(vec0_vtab *p, int i, i64 node_rowid,
   int rc =
       diskann_node_read(p, i, node_rowid, &validity, &validitySize,
                         &neighborIds, &neighborIdsSize, &qvecs, &qvecsSize);
+  // a row still in the buffer has no node, and upstream's delete can make
+  // one the medoid, so a search returns it; the flush gives it a node, but as
+  // on upstream no edge into the graph it replaced, whose nodes stay
+  // unreachable
   if (rc == SQLITE_EMPTY) {
-    vtab_set_error(&p->base,
-                   "node %lld of the DiskANN graph of vector column %d is "
-                   "missing",
-                   node_rowid, i);
-    return SQLITE_ERROR;
+    return SQLITE_OK;
   }
   if (rc != SQLITE_OK) {
     return rc;
