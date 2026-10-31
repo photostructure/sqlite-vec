@@ -592,9 +592,9 @@ def test_connect_accepts_vector_definition_earlier_releases_created(
 
 
 # Upstream matches the keywords of `indexed by` by prefix and accepts a comma
-# before rescore's `)`, at CREATE too, so its tables can store `index by f()`
-# and `rescore(quantizer=int8,)`. CREATE here wants whole keywords and no
-# trailing comma; connect opens such a table.
+# before rescore's or diskann's `)`, at CREATE too, so its tables can store
+# `index by f()`, `rescore(quantizer=int8,)` and `d(n=i, n_neigh=16)`. CREATE
+# here wants whole keywords and no trailing comma; connect opens such a table.
 @pytest.mark.parametrize(
     "created, stored",
     [
@@ -607,6 +607,14 @@ def test_connect_accepts_vector_definition_earlier_releases_created(
         (
             "indexed by rescore(quantizer=int8, oversample=16)",
             "indexed by rescore(quantizer=int8, oversample=16,)",
+        ),
+        (
+            "indexed by diskann(neighbor_quantizer=int8, n_neighbors=16)",
+            "indexed by d(n=i, n_neigh=16)",
+        ),
+        (
+            "indexed by diskann(neighbor_quantizer=int8, search_list_size_search=32)",
+            "indexed by disk(neighbor_quantizer=int8, search_list_size_search=32,)",
         ),
     ],
 )

@@ -3038,10 +3038,15 @@ static int vec0_parse_diskann_int(const struct Vec0Token *token, long min,
  * in its place `search_list_size_search=N` and `search_list_size_insert=N`;
  * and `buffer_threshold=N`, 0 when omitted.
  *
+ * @param strict true to require whole keywords and no comma before the ')';
+ * false to accept a prefix of a keyword and a comma there, as upstream does.
+ * Upstream wants `search_list_size_search` and `search_list_size_insert`
+ * whole, and so does this either way.
  * @return SQLITE_OK, or SQLITE_ERROR for any other text.
  */
 static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
-                                      struct Vec0DiskannConfig *outConfig) {
+                                      struct Vec0DiskannConfig *outConfig,
+                                      bool strict) {
   struct Vec0Token token;
   int hasQuantizer = 0;
   int hasSearchListSize = 0;
@@ -3071,25 +3076,25 @@ static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
     if (rc != VEC0_TOKEN_RESULT_SOME) {
       return SQLITE_ERROR;
     }
-    if (vec0_token_is_keyword(&key, "neighbor_quantizer", true)) {
+    if (vec0_token_is_keyword(&key, "neighbor_quantizer", strict)) {
       if (token.token_type != TOKEN_TYPE_IDENTIFIER) {
         return SQLITE_ERROR;
       }
-      if (vec0_token_is_keyword(&token, "binary", true)) {
+      if (vec0_token_is_keyword(&token, "binary", strict)) {
         outConfig->quantizer_type = VEC0_DISKANN_QUANTIZER_BINARY;
-      } else if (vec0_token_is_keyword(&token, "int8", true)) {
+      } else if (vec0_token_is_keyword(&token, "int8", strict)) {
         outConfig->quantizer_type = VEC0_DISKANN_QUANTIZER_INT8;
       } else {
         return SQLITE_ERROR;
       }
       hasQuantizer = 1;
-    } else if (vec0_token_is_keyword(&key, "n_neighbors", true)) {
+    } else if (vec0_token_is_keyword(&key, "n_neighbors", strict)) {
       if (vec0_parse_diskann_int(&token, 8, VEC0_DISKANN_MAX_N_NEIGHBORS,
                                  &outConfig->n_neighbors) != SQLITE_OK ||
           outConfig->n_neighbors % 8 != 0) {
         return SQLITE_ERROR;
       }
-    } else if (vec0_token_is_keyword(&key, "search_list_size", true)) {
+    } else if (vec0_token_is_keyword(&key, "search_list_size", strict)) {
       if (vec0_parse_diskann_int(&token, 1, INT_MAX,
                                  &outConfig->search_list_size) != SQLITE_OK) {
         return SQLITE_ERROR;
@@ -3109,7 +3114,7 @@ static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
         return SQLITE_ERROR;
       }
       hasSplitSearchListSize = 1;
-    } else if (vec0_token_is_keyword(&key, "buffer_threshold", true)) {
+    } else if (vec0_token_is_keyword(&key, "buffer_threshold", strict)) {
       if (vec0_parse_diskann_int(&token, 0, INT_MAX,
                                  &outConfig->buffer_threshold) != SQLITE_OK) {
         return SQLITE_ERROR;
@@ -3126,6 +3131,10 @@ static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
       return SQLITE_ERROR;
     }
     rc = vec0_scanner_next(scanner, &token);
+    if (!strict && rc == VEC0_TOKEN_RESULT_SOME &&
+        token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
   }
   if (!hasQuantizer || (hasSearchListSize && hasSplitSearchListSize)) {
     return SQLITE_ERROR;
@@ -3350,14 +3359,15 @@ int vec0_parse_vector_column(const char *source, int source_length,
 #if SQLITE_VEC_ENABLE_DISKANN
       // vec0_init() refuses a bit column and a binary quantizer on dimensions
       // that are not a multiple of 8, with messages of their own
-      else if (vec0_token_is_keyword(&token, "diskann", true)) {
+      else if (vec0_token_is_keyword(&token, "diskann", strict)) {
         indexType = VEC0_INDEX_TYPE_DISKANN;
         rc = vec0_scanner_next(&scanner, &token);
         if (rc != VEC0_TOKEN_RESULT_SOME ||
             token.token_type != TOKEN_TYPE_LPAREN) {
           return SQLITE_ERROR;
         }
-        if (vec0_parse_diskann_options(&scanner, &diskannConfig) != SQLITE_OK) {
+        if (vec0_parse_diskann_options(&scanner, &diskannConfig, strict) !=
+            SQLITE_OK) {
           return SQLITE_ERROR;
         }
       }

@@ -998,6 +998,48 @@ void test_vec0_parse_vector_column_diskann() {
     assert(rc == SQLITE_ERROR);
   }
 
+  // A prefix of a keyword: an error when strict, read as upstream reads it
+  // when not. Upstream's build at 04d28bd creates this column as binary with
+  // 16 neighbors and a buffer of 4: `n` is neighbor_quantizer, not
+  // n_neighbors, and `s` is search_list_size.
+  {
+    const char *input =
+        "emb float[128] indexed by d(n=b, n_neigh=16, s=32, buf=4)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_DISKANN);
+    assert(col.diskann.quantizer_type == VEC0_DISKANN_QUANTIZER_BINARY);
+    assert(col.diskann.n_neighbors == 16);
+    assert(col.diskann.search_list_size == 32);
+    assert(col.diskann.buffer_threshold == 4);
+    sqlite3_free(col.name);
+  }
+  // Upstream wants search_list_size_search and search_list_size_insert whole,
+  // and its build refuses this one
+  {
+    const char *input = "emb float[128] indexed by "
+                        "diskann(neighbor_quantizer=i, search_list_size_s=32)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_ERROR);
+  }
+  // A comma before ')': an error when strict, accepted as upstream accepts it
+  // when not
+  {
+    const char *input = "emb float[128] indexed by "
+                        "diskann(neighbor_quantizer=int8, "
+                        "search_list_size_search=64,)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, true);
+    assert(rc == SQLITE_ERROR);
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col, false);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_DISKANN);
+    assert(col.diskann.quantizer_type == VEC0_DISKANN_QUANTIZER_INT8);
+    assert(col.diskann.search_list_size_search == 64);
+    sqlite3_free(col.name);
+  }
+
   printf("  All vec0_parse_vector_column_diskann tests passed.\n");
 }
 
