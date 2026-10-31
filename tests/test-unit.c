@@ -1388,13 +1388,9 @@ void test_diskann_candidate_list_operations() {
   assert(list.count == 5);
   assert(list.items[4].rowid == 40);
 
-  // re-ranking by an exact distance moves a candidate either way
+  // re-ranking by a nearer exact distance moves a candidate forward
   // (list: 10 0.5, 20 1.0, 30 2.0, 60 3.5, 40 4.0)
-  int at = diskann_candidate_list_rerank(&list, 0, 3.0f);
-  assert(at == 2);
-  assert(list.items[2].rowid == 10 && list.items[2].visited == 1);
-  assert(list.items[0].rowid == 20 && list.items[1].rowid == 30);
-  at = diskann_candidate_list_rerank(&list, 4, 0.1f);
+  int at = diskann_candidate_list_rerank(&list, 4, 0.1f);
   assert(at == 0);
   assert(list.items[0].rowid == 40);
   for (int i = 1; i < list.count; i++) {

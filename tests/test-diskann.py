@@ -1600,6 +1600,42 @@ def test_diskann_deleted_medoid_is_replaced_from_the_graph(db):
     assert all(finds_itself(r) for r in nodes())
 
 
+def test_diskann_finds_neighbors_when_exact_distances_exceed_quantized_ones(db):
+    """
+    Exact L2 distances of vectors scaled by 100 run past the hamming counts a
+    binary search ranks unvisited rows by. A search that moved each visited
+    row by its exact distance put it behind the unvisited ones, walked most of
+    the graph, and kept the rows it reached last: 0 of the 200 nearest. Upstream's
+    build at 04d28bd finds 72 of them here; this one finds 161.
+    """
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[16] INDEXED BY diskann(
+                neighbor_quantizer=binary, n_neighbors=16, search_list_size=32
+            )
+        )
+    """)
+    db.execute("CREATE VIRTUAL TABLE f USING vec0(emb float[16])")
+    rng = random.Random(7)
+    centers = [[rng.uniform(-1, 1) for _ in range(16)] for _ in range(20)]
+
+    def near(center):
+        return _f32([100 * (x + rng.gauss(0, 0.3)) for x in center])
+
+    for i in range(1, 801):
+        vector = near(centers[i % 20])
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, vector])
+        db.execute("INSERT INTO f(rowid, emb) VALUES (?, ?)", [i, vector])
+    found = 0
+    for q in range(20):
+        query = near(centers[q])
+        knn = "SELECT rowid FROM {} WHERE emb MATCH ? AND k = 10"
+        got = {r[0] for r in db.execute(knn.format("t"), [query])}
+        want = {r[0] for r in db.execute(knn.format("f"), [query])}
+        found += len(got & want)
+    assert found >= 120
+
+
 @pytest.mark.parametrize("blob", [b"", b"\x00" * 4])
 def test_diskann_corrupt_buffer_row_errors(db, blob):
     """A buffered vector of the wrong size fails the flush and a KNN query."""

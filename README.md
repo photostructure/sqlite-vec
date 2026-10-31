@@ -390,8 +390,8 @@ A `float` or `int8` vector column declared
 `indexed by diskann(neighbor_quantizer=int8)` keeps a graph of its rows, after
 the LM-DiskANN paper: each row links to up to `n_neighbors` others and keeps
 their vectors quantized. A KNN query walks the graph from one entry row,
-keeping the `search_list_size` nearest rows it has seen, and ranks each row by
-its exact distance once it reaches it. It reads a few hundred rows of a large
+keeping the `search_list_size` nearest rows it has seen, and returns the rows
+it reached, ranked by their exact distances. It reads a few hundred rows of a large
 table where a flat column reads them all, and its distances are exact, but a
 row it never reaches is missing from its results:
 

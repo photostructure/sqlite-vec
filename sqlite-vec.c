@@ -11146,10 +11146,15 @@ static int diskann_vector_write(vec0_vtab *p, int i, i64 rowid,
 
 struct Vec0DiskannCandidate {
   i64 rowid;
+  // the distance the search ranks it by: its quantized distance, or its exact
+  // one once that is nearer
   f32 distance;
-  // set once the search has read the candidate's node
+  // its exact distance, once confirmed
+  f32 exact;
+  // set once the search has taken the candidate to expand, whether or not it
+  // finds its node
   int visited;
-  // set once its exact distance replaced its quantized one
+  // set once the search has read its vector
   int confirmed;
 };
 
@@ -11182,8 +11187,8 @@ void diskann_candidate_list_free(struct DiskannCandidateList *list) {
 }
 
 /**
- * Moves the candidate at index i to its place by distance, and returns that
- * place.
+ * Moves the candidate at index i, whose distance just became nearer, forward
+ * to its place by distance, and returns that place.
  */
 static int diskann_candidate_list_sift(struct DiskannCandidateList *list,
                                        int i) {
@@ -11191,10 +11196,6 @@ static int diskann_candidate_list_sift(struct DiskannCandidateList *list,
   while (i > 0 && list->items[i - 1].distance > item.distance) {
     list->items[i] = list->items[i - 1];
     i--;
-  }
-  while (i + 1 < list->count && list->items[i + 1].distance < item.distance) {
-    list->items[i] = list->items[i + 1];
-    i++;
   }
   list->items[i] = item;
   return i;
@@ -11243,8 +11244,8 @@ int diskann_candidate_list_insert(struct DiskannCandidateList *list, i64 rowid,
 }
 
 /**
- * Gives the candidate at index i its exact distance, nearer or farther than
- * the quantized one it was ranked by, and returns its new index.
+ * Ranks the candidate at index i by distance, nearer than the one it was
+ * ranked by, and returns its new index.
  */
 int diskann_candidate_list_rerank(struct DiskannCandidateList *list, int i,
                                   f32 distance) {
@@ -11368,10 +11369,11 @@ int diskann_visited_set_insert(struct DiskannVisitedSet *set, i64 rowid,
  * element type, by LM-Search in the LM-DiskANN paper: a greedy walk of the
  * graph from the medoid that keeps the nearest searchListSize candidates (at
  * least k), visits the nearest not yet visited until it has visited them all,
- * and ranks a candidate by its quantized distance until it is visited and by
- * its exact distance after. A candidate whose vector is gone, a deleted row
- * an edge still names, is left out. Writes up to k of the nearest, nearest
- * first, to outRowids and outDistances, and their number to *outCount.
+ * and ranks a candidate by its quantized distance, or once visited by its
+ * exact distance when that is nearer. A candidate whose vector is gone, a
+ * deleted row an edge still names, is left out. Writes up to k of the visited
+ * candidates nearest by exact distance, nearest first, with those distances,
+ * to outRowids and outDistances, and their number to *outCount.
  */
 static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
                           int searchListSize, i64 *outRowids, f32 *outDistances,
@@ -11425,6 +11427,7 @@ static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
     goto cleanup;
   }
   diskann_candidate_list_insert(&candidates, medoid, medoidDistance);
+  candidates.items[0].exact = medoidDistance;
   candidates.items[0].confirmed = 1;
 
   for (int next;
@@ -11437,15 +11440,21 @@ static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
       goto cleanup;
     }
 
-    // paper line 13: rank the visited candidate by its exact distance
+    // paper line 13: the visited candidate's exact distance, which ranks it
+    // only when nearer, as upstream does: a quantized distance can be on a
+    // smaller scale, a hamming count or an int8 distance, and a visited
+    // candidate moved behind the unvisited ones would leave the list
     if (!candidates.items[next].confirmed) {
       void *vector = NULL;
       rc = diskann_vector_read(p, i, rowid, &vector, NULL);
       if (rc == SQLITE_OK) {
         f32 distance = vec0_compute_distance(col, vector, queryVector);
         sqlite3_free(vector);
-        next = diskann_candidate_list_rerank(&candidates, next, distance);
+        candidates.items[next].exact = distance;
         candidates.items[next].confirmed = 1;
+        if (distance < candidates.items[next].distance) {
+          diskann_candidate_list_rerank(&candidates, next, distance);
+        }
       } else if (rc != SQLITE_EMPTY) {
         goto cleanup;
       }
@@ -11480,12 +11489,26 @@ static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
     sqlite3_free(qvecs);
   }
 
-  for (int j = 0; j < candidates.count && *outCount < k; j++) {
-    if (candidates.items[j].confirmed) {
-      outRowids[*outCount] = candidates.items[j].rowid;
-      outDistances[*outCount] = candidates.items[j].distance;
-      (*outCount)++;
+  // the k confirmed candidates nearest by exact distance, nearest first
+  for (int j = 0; j < candidates.count; j++) {
+    if (!candidates.items[j].confirmed) {
+      continue;
     }
+    f32 distance = candidates.items[j].exact;
+    int at;
+    if (*outCount < k) {
+      at = (*outCount)++;
+    } else if (distance < outDistances[k - 1]) {
+      at = k - 1;
+    } else {
+      continue;
+    }
+    for (; at > 0 && outDistances[at - 1] > distance; at--) {
+      outRowids[at] = outRowids[at - 1];
+      outDistances[at] = outDistances[at - 1];
+    }
+    outRowids[at] = candidates.items[j].rowid;
+    outDistances[at] = distance;
   }
   rc = SQLITE_OK;
 

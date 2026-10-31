@@ -191,6 +191,7 @@ int diskann_prune_select(const float *p_distances, int num_candidates,
 struct Vec0DiskannCandidate {
   long long rowid;
   float distance;
+  float exact;
   int visited;
   int confirmed;
 };
