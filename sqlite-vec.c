@@ -10578,7 +10578,8 @@ static int rescore_handle_command(vec0_vtab *p, const char *command) {
 // n_neighbors slots, the rowid of the neighbor in each slot, and each
 // neighbor's vector quantized by the column's neighbor_quantizer, so a search
 // ranks a node's neighbors without reading their vectors. Every search starts
-// at the medoid, the `diskann_medoid_NN` row of _info.
+// at the medoid, the `diskann_medoid_NN` row of _info, or at another node when
+// the medoid has none (diskann_start_node()).
 // https://github.com/asg017/sqlite-vec/blob/04d28bd/sqlite-vec-diskann.c
 
 int diskann_validity_byte_size(int n_neighbors) {
@@ -10836,8 +10837,9 @@ static int diskann_exec_rowid(vec0_vtab *p, const char *zFormat,
 }
 
 /**
- * Reads the medoid of column i, the node every search starts at, into
- * *outMedoid, or sets *outIsEmpty when the graph has no node.
+ * Reads the medoid of column i, the node a search starts at unless it has
+ * none (diskann_start_node()), into *outMedoid, or sets *outIsEmpty when the
+ * graph has no node.
  */
 static int diskann_medoid_get(vec0_vtab *p, int i, i64 *outMedoid,
                               int *outIsEmpty) {
@@ -11011,6 +11013,86 @@ done:
     sqlite3_clear_bindings(stmt);
   }
   return rc;
+}
+
+/**
+ * Reads into *outStart the node of column i a search starts at: the medoid,
+ * or any node of the graph when the medoid has none, as upstream's delete
+ * can leave it: a row waiting in the buffer, or one deleted since. Sets
+ * *outIsEmpty when the graph has no node, and *outStale, unless it is NULL,
+ * when _info names a medoid with no node.
+ */
+static int diskann_start_node(vec0_vtab *p, int i, i64 *outStart,
+                              int *outIsEmpty, int *outStale) {
+  i64 medoid;
+  int isEmpty;
+  int rc = diskann_medoid_get(p, i, &medoid, &isEmpty);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  *outIsEmpty = isEmpty;
+  if (outStale) {
+    *outStale = 0;
+  }
+  if (isEmpty) {
+    return SQLITE_OK;
+  }
+  u8 *validity = NULL, *neighborIds = NULL, *qvecs = NULL;
+  int validitySize, neighborIdsSize, qvecsSize;
+  rc = diskann_node_read(p, i, medoid, &validity, &validitySize, &neighborIds,
+                         &neighborIdsSize, &qvecs, &qvecsSize);
+  sqlite3_free(validity);
+  sqlite3_free(neighborIds);
+  sqlite3_free(qvecs);
+  if (rc != SQLITE_EMPTY) {
+    *outStart = medoid;
+    return rc;
+  }
+  if (outStale) {
+    *outStale = 1;
+  }
+
+  sqlite3_stmt *stmt = NULL;
+  char *zSql = sqlite3_mprintf("SELECT rowid FROM \"%w\".\"%w\" LIMIT 1",
+                               p->schemaName, p->shadowDiskannNodesNames[i]);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+      *outStart = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_ROW || rc == SQLITE_DONE) {
+      *outIsEmpty = rc == SQLITE_DONE;
+      return SQLITE_OK;
+    }
+    rc = vec0_error_rc(rc);
+  }
+  if (rc != SQLITE_INTERRUPT) {
+    vtab_set_error(&p->base,
+                   "could not find a node of the DiskANN graph of vector "
+                   "column %d: %s",
+                   i, sqlite3_errmsg(p->db));
+  }
+  return rc;
+}
+
+/**
+ * Replaces the medoid of column i, when it has no node, with any node of the
+ * graph, or marks the graph empty when it has none.
+ */
+static int diskann_medoid_replace(vec0_vtab *p, int i) {
+  i64 start = 0;
+  int isEmpty, isStale;
+  int rc = diskann_start_node(p, i, &start, &isEmpty, &isStale);
+  if (rc != SQLITE_OK || !isStale) {
+    return rc;
+  }
+  return diskann_medoid_set(p, i, start, isEmpty);
 }
 
 /**
@@ -11369,9 +11451,10 @@ int diskann_visited_set_insert(struct DiskannVisitedSet *set, i64 rowid,
 /**
  * Finds the rows of column i nearest queryVector, a vector of the column's
  * element type, by LM-Search in the LM-DiskANN paper: a greedy walk of the
- * graph from the medoid that keeps the nearest searchListSize candidates (at
- * least k), visits the nearest not yet visited until it has visited them all,
- * and ranks a candidate by its quantized distance, or once visited by its
+ * graph from the medoid, or from another node when the medoid has none
+ * (diskann_start_node()), that keeps the nearest searchListSize candidates
+ * (at least k), visits the nearest not yet visited until it has visited them
+ * all, and ranks a candidate by its quantized distance, or once visited by its
  * exact distance when that is nearer. A candidate whose vector is gone, a
  * deleted row an edge still names, is left out. Writes up to k of the visited
  * candidates nearest by exact distance, nearest first, with those distances,
@@ -11385,34 +11468,34 @@ static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
   struct DiskannCandidateList candidates = {0};
   struct DiskannVisitedSet visited = {0};
   u8 *queryQuantized = NULL;
-  void *medoidVector = NULL;
+  void *startVector = NULL;
   int rc;
 
   *outCount = 0;
   if (searchListSize < k) {
     searchListSize = k;
   }
-  i64 medoid;
+  i64 start;
   int isEmpty;
-  rc = diskann_medoid_get(p, i, &medoid, &isEmpty);
+  rc = diskann_start_node(p, i, &start, &isEmpty, NULL);
   if (rc != SQLITE_OK || isEmpty) {
     return rc;
   }
 
-  // the medoid starts the walk ranked by its exact distance
-  rc = diskann_vector_read(p, i, medoid, &medoidVector, NULL);
+  // the start node begins the walk ranked by its exact distance
+  rc = diskann_vector_read(p, i, start, &startVector, NULL);
   if (rc != SQLITE_OK) {
     if (rc == SQLITE_EMPTY) {
       vtab_set_error(&p->base,
-                     "the DiskANN medoid %lld of vector column %d has no "
-                     "vector",
-                     medoid, i);
+                     "node %lld of the DiskANN graph of vector column %d "
+                     "has no vector",
+                     start, i);
       rc = SQLITE_ERROR;
     }
     return rc;
   }
-  f32 medoidDistance = vec0_compute_distance(col, medoidVector, queryVector);
-  sqlite3_free(medoidVector);
+  f32 startDistance = vec0_compute_distance(col, startVector, queryVector);
+  sqlite3_free(startVector);
 
   queryQuantized = sqlite3_malloc((int)diskann_quantized_vector_byte_size(
       cfg->quantizer_type, col->dimensions));
@@ -11428,8 +11511,8 @@ static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
   if (rc != SQLITE_OK) {
     goto cleanup;
   }
-  diskann_candidate_list_insert(&candidates, medoid, medoidDistance);
-  candidates.items[0].exact = medoidDistance;
+  diskann_candidate_list_insert(&candidates, start, startDistance);
+  candidates.items[0].exact = startDistance;
   candidates.items[0].confirmed = 1;
 
   for (int next;
@@ -11711,9 +11794,9 @@ cleanup:
 
 /**
  * Makes target_rowid, whose vector is target_vector, a neighbor of node
- * node_rowid of column i, unless node_rowid has no node. A node with every
- * slot taken keeps the nearer of the target and its farthest neighbor by
- * quantized distance, which reads no neighbor's vector.
+ * node_rowid of column i. A node with every slot taken keeps the nearer of
+ * the target and its farthest neighbor by quantized distance, which reads no
+ * neighbor's vector.
  */
 static int diskann_add_reverse_edge(vec0_vtab *p, int i, i64 node_rowid,
                                     i64 target_rowid,
@@ -11727,12 +11810,12 @@ static int diskann_add_reverse_edge(vec0_vtab *p, int i, i64 node_rowid,
   int rc =
       diskann_node_read(p, i, node_rowid, &validity, &validitySize,
                         &neighborIds, &neighborIdsSize, &qvecs, &qvecsSize);
-  // a row still in the buffer has no node, and upstream's delete can make
-  // one the medoid, so a search returns it; the flush gives it a node, but as
-  // on upstream no edge into the graph it replaced, whose nodes stay
-  // unreachable
   if (rc == SQLITE_EMPTY) {
-    return SQLITE_OK;
+    vtab_set_error(&p->base,
+                   "node %lld of the DiskANN graph of vector column %d is "
+                   "missing",
+                   node_rowid, i);
+    return SQLITE_ERROR;
   }
   if (rc != SQLITE_OK) {
     return rc;
@@ -11879,9 +11962,15 @@ static int diskann_buffer_failed(vec0_vtab *p, int i, const char *zWhat,
 
 /**
  * Links the vectors waiting in _diskann_bufferNN of column i into the graph,
- * in rowid order, and empties the buffer.
+ * in rowid order, and empties the buffer. A medoid with no node, which
+ * upstream's delete can leave, is replaced first, so the rows link into the
+ * graph.
  */
 static int diskann_flush_buffer(vec0_vtab *p, int i) {
+  int rc = diskann_medoid_replace(p, i);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
   sqlite3_stmt *stmt = NULL;
   char *zSql = sqlite3_mprintf("SELECT rowid, vector FROM \"%w\".\"%w\" "
                                "ORDER BY rowid",
@@ -11889,7 +11978,7 @@ static int diskann_flush_buffer(vec0_vtab *p, int i) {
   if (!zSql) {
     return SQLITE_NOMEM;
   }
-  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
   sqlite3_free(zSql);
   if (rc != SQLITE_OK) {
     return diskann_buffer_failed(p, i, "read", rc);
@@ -12187,9 +12276,10 @@ cleanup:
  * Removes row rowid from column i. A row waiting in the buffer leaves the
  * buffer and _vectorsNN. A node of the graph has its neighbors repaired
  * (diskann_repair_reverse_edges()), leaves _diskann_nodesNN and _vectorsNN,
- * gives way as medoid to any node of the graph left, or to an empty graph,
  * and has every slot that still names it cleared
- * (diskann_scrub_deleted_rowid()).
+ * (diskann_scrub_deleted_rowid()). Then a medoid with no node, the row
+ * deleted or one upstream's delete left (diskann_start_node()), gives way to
+ * any node of the graph left, or to an empty graph.
  */
 static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
   struct VectorColumnDefinition *col = &p->vector_columns[i];
@@ -12214,11 +12304,12 @@ static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
     if (rc == SQLITE_ROW) {
       rc = diskann_exec_rowid(p, "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
                               p->shadowDiskannBufferNames[i], rowid);
-      if (rc != SQLITE_OK) {
-        return rc;
-      }
-      return diskann_exec_rowid(p, "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
+      if (rc == SQLITE_OK) {
+        rc = diskann_exec_rowid(p, "DELETE FROM \"%w\".\"%w\" WHERE rowid = ?",
                                 p->shadowDiskannVectorsNames[i], rowid);
+      }
+      // upstream's delete can have made the row the medoid
+      return rc == SQLITE_OK ? diskann_medoid_replace(p, i) : rc;
     }
     if (rc != SQLITE_DONE) {
       return diskann_buffer_failed(p, i, "read", vec0_error_rc(rc));
@@ -12265,39 +12356,8 @@ static int diskann_delete(vec0_vtab *p, int i, i64 rowid) {
 
   // a new medoid comes from the graph, which a vector waiting in the buffer
   // has not joined
-  i64 medoid = 0;
-  int isEmpty = 1;
   if (rc == SQLITE_OK) {
-    rc = diskann_medoid_get(p, i, &medoid, &isEmpty);
-  }
-  if (rc == SQLITE_OK && !isEmpty && medoid == rowid) {
-    sqlite3_stmt *stmt = NULL;
-    char *zSql = sqlite3_mprintf("SELECT rowid FROM \"%w\".\"%w\" LIMIT 1",
-                                 p->schemaName, p->shadowDiskannNodesNames[i]);
-    if (!zSql) {
-      return SQLITE_NOMEM;
-    }
-    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
-    sqlite3_free(zSql);
-    i64 next = 0;
-    if (rc == SQLITE_OK) {
-      rc = sqlite3_step(stmt);
-      if (rc == SQLITE_ROW) {
-        next = sqlite3_column_int64(stmt, 0);
-      }
-      sqlite3_finalize(stmt);
-    }
-    if (rc == SQLITE_ROW || rc == SQLITE_DONE) {
-      rc = diskann_medoid_set(p, i, next, rc == SQLITE_DONE);
-    } else {
-      rc = vec0_error_rc(rc);
-      if (rc != SQLITE_INTERRUPT) {
-        vtab_set_error(&p->base,
-                       "could not choose a new DiskANN medoid for vector "
-                       "column %d: %s",
-                       i, sqlite3_errmsg(p->db));
-      }
-    }
+    rc = diskann_medoid_replace(p, i);
   }
   if (rc == SQLITE_OK) {
     rc = diskann_scrub_deleted_rowid(p, i, rowid);

@@ -1646,38 +1646,139 @@ def test_diskann_finds_neighbors_when_exact_distances_exceed_quantized_ones(db):
     assert found >= 120
 
 
-def test_diskann_insert_links_to_a_buffered_medoid(db):
+def _diskann_insert(db, *rowids):
+    for rowid in rowids:
+        db.execute(
+            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([rowid] * 8)]
+        )
+
+
+def _diskann_with_medoid(db, rows, medoid):
     """
-    Upstream's delete can make a row still in the buffer, with no node, the
-    medoid. An insert whose row flushes before it then links to the medoid;
-    upstream's build accepts it, and so does this one.
+    Writes a state upstream's build (asg017 04d28bd) can leave, which this
+    build's delete does not: buffer_threshold=3, rows inserted in order, and
+    _info naming medoid, a row with no node. A medoid among rows is one
+    upstream's delete chose from _vectors00 while it waited in the buffer; a
+    medoid not among them is one upstream's delete removed since. Returns a
+    function that runs a KNN query near row 11 and returns its rowids, nearest
+    first.
     """
     db.execute("""
         CREATE VIRTUAL TABLE t USING vec0(
             emb float[8] INDEXED BY diskann(
-                neighbor_quantizer=binary, n_neighbors=8, buffer_threshold=2
+                neighbor_quantizer=binary, n_neighbors=8, buffer_threshold=3
             )
         )
     """)
-    for rowid in (10, 11, 20):
-        db.execute(
-            "INSERT INTO t(rowid, emb) VALUES (?, ?)", [rowid, _f32([rowid / 10] * 8)]
-        )
-    db.execute("UPDATE t_info SET value = 20 WHERE key = 'diskann_medoid_00'")
-    db.execute("INSERT INTO t(rowid, emb) VALUES (5, ?)", [_f32([0.5] * 8)])
+    _diskann_insert(db, *rows)
+    db.execute("UPDATE t_info SET value = ? WHERE key = 'diskann_medoid_00'", [medoid])
+
+    def knn():
+        sql = "SELECT rowid FROM t WHERE emb MATCH ? AND k = 10"
+        return [r for (r,) in db.execute(sql, [_f32([11.25] * 8)])]
+
+    return knn
+
+
+def _diskann_medoid_is_a_node(db):
+    return db.execute("""
+            SELECT count(*) FROM t_diskann_nodes00 WHERE rowid =
+              (SELECT value FROM t_info WHERE key = 'diskann_medoid_00')
+        """).fetchone()[0] == 1
+
+
+def test_diskann_knn_walks_the_graph_from_a_buffered_medoid(db):
+    """
+    A search starting at a buffered medoid found no node and returned only the
+    medoid, which the buffer scan added again: [5, 5], as upstream's build
+    returns. The search now starts at a node of the graph.
+    """
+    knn = _diskann_with_medoid(db, (10, 11, 12, 5), 5)
+    assert knn() == [11, 12, 10, 5]
+
+
+def test_diskann_flush_links_rows_into_the_graph_past_a_buffered_medoid(db):
+    """
+    A flush that kept the buffered medoid linked rows 1 and 2 only to it, and
+    it to none, so a KNN query found [5], as upstream's build does. The flush
+    now makes a node of the graph the medoid first.
+    """
+    knn = _diskann_with_medoid(db, (10, 11, 12, 5), 5)
+    _diskann_insert(db, 1, 2)
     nodes = db.execute("SELECT rowid FROM t_diskann_nodes00 ORDER BY rowid")
-    assert [r[0] for r in nodes] == [5, 10, 11, 20]
+    assert [r for (r,) in nodes] == [1, 2, 5, 10, 11, 12]
     assert db.execute("SELECT count(*) FROM t_diskann_buffer00").fetchone()[0] == 0
-    validity, ids = db.execute(
-        "SELECT neighbors_validity, neighbor_ids FROM t_diskann_nodes00"
-        " WHERE rowid = 5"
-    ).fetchone()
-    neighbors = [
-        rowid
-        for slot, rowid in enumerate(struct.unpack("8q", ids))
-        if validity[0] >> slot & 1
-    ]
-    assert neighbors == [20]
+    assert _diskann_medoid_is_a_node(db)
+    assert knn() == [11, 12, 10, 5, 2, 1]
+
+
+def test_diskann_delete_of_a_buffered_medoid_replaces_it(db):
+    """
+    Deleting a buffered medoid left _info naming a row with no vector, and a
+    KNN query or a flushing insert then failed with "the DiskANN medoid 5 of
+    vector column 0 has no vector". The delete now replaces the medoid with a
+    node of the graph, as the delete of a node does.
+    """
+    knn = _diskann_with_medoid(db, (10, 11, 12, 5), 5)
+    db.execute("DELETE FROM t WHERE rowid = 5")
+    assert _diskann_medoid_is_a_node(db)
+    assert knn() == [11, 12, 10]
+    _diskann_insert(db, 1, 2, 3)
+    assert knn() == [11, 12, 10, 3, 2, 1]
+
+
+@pytest.mark.parametrize(
+    "rows, deleted, after",
+    [
+        ((10, 11, 12, 5), 11, [12, 10, 5]),
+        ((10, 11, 12), 11, [12, 10]),
+        ((10, 11, 12, 5, 7), 7, [11, 12, 10, 5]),
+    ],
+)
+def test_diskann_delete_replaces_a_medoid_with_no_node(db, rows, deleted, after):
+    """
+    A delete replaced the medoid only when it deleted the medoid, so deleting
+    node 11, or buffered row 7, left _info naming row 5, buffered or deleted,
+    as upstream's build does. A delete now replaces any medoid with no node.
+    """
+    knn = _diskann_with_medoid(db, rows, 5)
+    db.execute("DELETE FROM t WHERE rowid = ?", [deleted])
+    assert _diskann_medoid_is_a_node(db)
+    assert knn() == after
+
+
+@pytest.mark.parametrize(
+    "graph, before, after",
+    [
+        ((10, 11, 12), [11, 12, 10], [11, 12, 10, 3, 2, 1]),
+        ((), [], [3, 2, 1]),
+    ],
+)
+def test_diskann_medoid_with_no_vector_is_replaced(db, graph, before, after):
+    """
+    Upstream's build deletes a buffered medoid without replacing it, and its
+    KNN queries and flushing inserts then fail, as this build's did with "the
+    DiskANN medoid 5 of vector column 0 has no vector". A search now starts at
+    a node of the graph, if it has one, and the flush replaces the medoid.
+    """
+    knn = _diskann_with_medoid(db, graph, 5)
+    assert knn() == before
+    _diskann_insert(db, 1, 2, 3)
+    assert _diskann_medoid_is_a_node(db)
+    assert knn() == after
+
+
+def test_diskann_buffered_medoid_of_an_empty_graph(db):
+    """
+    With no node in the graph, a search from a buffered medoid returned the
+    medoid, which the buffer scan added again: [5, 5]. The graph is now
+    searched as empty, and the flush gives it a node as medoid.
+    """
+    knn = _diskann_with_medoid(db, (5,), 5)
+    assert knn() == [5]
+    _diskann_insert(db, 1, 2)
+    assert _diskann_medoid_is_a_node(db)
+    assert knn() == [5, 2, 1]
 
 
 @pytest.mark.parametrize("blob", [b"", b"\x00" * 4])

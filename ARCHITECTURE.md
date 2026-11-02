@@ -62,7 +62,10 @@ slot holds a neighbor, `neighbor_ids` the neighbor's rowid as a 64-bit integer
 in the machine's byte order, and `neighbor_quantized_vectors` its vector
 quantized by the column's `neighbor_quantizer`, a bit or a byte per dimension.
 The `diskann_medoid_NN` row of `xyz_info` names the node every search starts
-at, and is `NULL` while the graph has no node.
+at, and is `NULL` while the graph has no node. A table upstream's build wrote
+can name a row with no node there, one waiting in `xyz_diskann_bufferNN` or
+one deleted since; a search then starts at any node, and the next delete or
+buffer flush names a node instead.
 
 - `rowid INTEGER`
 - `neighbors_validity BLOB`
