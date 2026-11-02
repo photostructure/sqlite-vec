@@ -11242,24 +11242,35 @@ struct Vec0DiskannCandidate {
   int confirmed;
 };
 
+// The slots a search's candidate list and visited set start with. Both grow as
+// the search fills them, so a search list size up to INT_MAX allocates for the
+// rows a search reaches.
+#define VEC0_DISKANN_SEARCH_INITIAL_SLOTS VEC0_DISKANN_DEFAULT_SEARCH_LIST_SIZE
+
 /**
- * The candidates of a search, nearest first, at most capacity of them.
+ * The candidates of a search, nearest first, at most capacity of them, in
+ * items of allocated slots, which grows toward capacity as the list fills.
  */
 struct DiskannCandidateList {
   struct Vec0DiskannCandidate *items;
   int count;
   int capacity;
+  int allocated;
 };
 
 int diskann_candidate_list_init(struct DiskannCandidateList *list,
                                 int capacity) {
-  list->items = sqlite3_malloc64((sqlite3_uint64)capacity *
+  int allocated = capacity < VEC0_DISKANN_SEARCH_INITIAL_SLOTS
+                      ? capacity
+                      : VEC0_DISKANN_SEARCH_INITIAL_SLOTS;
+  list->items = sqlite3_malloc64((sqlite3_uint64)allocated *
                                  sizeof(struct Vec0DiskannCandidate));
   if (!list->items) {
     return SQLITE_NOMEM;
   }
   list->count = 0;
   list->capacity = capacity;
+  list->allocated = allocated;
   return SQLITE_OK;
 }
 
@@ -11268,6 +11279,7 @@ void diskann_candidate_list_free(struct DiskannCandidateList *list) {
   list->items = NULL;
   list->count = 0;
   list->capacity = 0;
+  list->allocated = 0;
 }
 
 /**
@@ -11288,25 +11300,40 @@ static int diskann_candidate_list_sift(struct DiskannCandidateList *list,
 /**
  * Adds candidate rowid at distance, unvisited. A rowid the list holds keeps
  * its place unless distance is nearer, and a list at capacity drops its
- * farthest candidate for a nearer one and ignores a farther one. Returns 1
- * when the list holds the rowid afterward.
+ * farthest candidate for a nearer one and ignores a farther one. Sets
+ * *outHeld to 1 when the list holds the rowid afterward.
  */
 int diskann_candidate_list_insert(struct DiskannCandidateList *list, i64 rowid,
-                                  f32 distance) {
+                                  f32 distance, int *outHeld) {
+  *outHeld = 1;
   for (int i = 0; i < list->count; i++) {
     if (list->items[i].rowid == rowid) {
       if (distance < list->items[i].distance) {
         list->items[i].distance = distance;
         diskann_candidate_list_sift(list, i);
       }
-      return 1;
+      return SQLITE_OK;
     }
   }
   if (list->count >= list->capacity) {
     if (distance >= list->items[list->count - 1].distance) {
-      return 0;
+      *outHeld = 0;
+      return SQLITE_OK;
     }
     list->count--;
+  } else if (list->count == list->allocated) {
+    sqlite3_uint64 allocated = (sqlite3_uint64)list->allocated * 2;
+    if (allocated > (sqlite3_uint64)list->capacity) {
+      allocated = list->capacity;
+    }
+    struct Vec0DiskannCandidate *items = sqlite3_realloc64(
+        list->items, allocated * sizeof(struct Vec0DiskannCandidate));
+    if (!items) {
+      *outHeld = 0;
+      return SQLITE_NOMEM;
+    }
+    list->items = items;
+    list->allocated = (int)allocated;
   }
   int lo = 0, hi = list->count;
   while (lo < hi) {
@@ -11324,7 +11351,7 @@ int diskann_candidate_list_insert(struct DiskannCandidateList *list, i64 rowid,
   list->items[lo].visited = 0;
   list->items[lo].confirmed = 0;
   list->count++;
-  return 1;
+  return SQLITE_OK;
 }
 
 /**
@@ -11457,20 +11484,26 @@ int diskann_visited_set_insert(struct DiskannVisitedSet *set, i64 rowid,
  * all, and ranks a candidate by its quantized distance, or once visited by its
  * exact distance when that is nearer. A candidate whose vector is gone, a
  * deleted row an edge still names, is left out. Writes up to k of the visited
- * candidates nearest by exact distance, nearest first, with those distances,
- * to outRowids and outDistances, and their number to *outCount.
+ * candidates nearest by exact distance, nearest first, to *outRowids and their
+ * distances to *outDistances, arrays the caller frees with sqlite3_free(), and
+ * their number to *outCount.
  */
 static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
-                          int searchListSize, i64 *outRowids, f32 *outDistances,
-                          int *outCount) {
+                          int searchListSize, i64 **outRowids,
+                          f32 **outDistances, int *outCount) {
   struct VectorColumnDefinition *col = &p->vector_columns[i];
   struct Vec0DiskannConfig *cfg = &col->diskann;
   struct DiskannCandidateList candidates = {0};
   struct DiskannVisitedSet visited = {0};
   u8 *queryQuantized = NULL;
   void *startVector = NULL;
+  i64 *rowids = NULL;
+  f32 *distances = NULL;
+  int held;
   int rc;
 
+  *outRowids = NULL;
+  *outDistances = NULL;
   *outCount = 0;
   if (searchListSize < k) {
     searchListSize = k;
@@ -11507,11 +11540,14 @@ static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
   if (rc != SQLITE_OK) {
     goto cleanup;
   }
-  rc = diskann_visited_set_init(&visited, searchListSize);
+  rc = diskann_visited_set_init(&visited, VEC0_DISKANN_SEARCH_INITIAL_SLOTS);
   if (rc != SQLITE_OK) {
     goto cleanup;
   }
-  diskann_candidate_list_insert(&candidates, start, startDistance);
+  rc = diskann_candidate_list_insert(&candidates, start, startDistance, &held);
+  if (rc != SQLITE_OK) {
+    goto cleanup;
+  }
   candidates.items[0].exact = startDistance;
   candidates.items[0].confirmed = 1;
 
@@ -11567,37 +11603,59 @@ static int diskann_search(vec0_vtab *p, int i, const void *queryVector, int k,
           col, queryQuantized,
           diskann_neighbor_qvec_get(qvecs, j, cfg->quantizer_type,
                                     col->dimensions));
-      diskann_candidate_list_insert(&candidates, neighbor, distance);
+      rc =
+          diskann_candidate_list_insert(&candidates, neighbor, distance, &held);
+      if (rc != SQLITE_OK) {
+        break;
+      }
     }
     sqlite3_free(validity);
     sqlite3_free(neighborIds);
     sqlite3_free(qvecs);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
   }
 
   // the k confirmed candidates nearest by exact distance, nearest first
+  int n = candidates.count < k ? candidates.count : k;
+  rowids = sqlite3_malloc64((sqlite3_uint64)n * sizeof(i64));
+  distances = sqlite3_malloc64((sqlite3_uint64)n * sizeof(f32));
+  if (!rowids || !distances) {
+    rc = SQLITE_NOMEM;
+    goto cleanup;
+  }
+  int count = 0;
   for (int j = 0; j < candidates.count; j++) {
     if (!candidates.items[j].confirmed) {
       continue;
     }
     f32 distance = candidates.items[j].exact;
     int at;
-    if (*outCount < k) {
-      at = (*outCount)++;
-    } else if (distance < outDistances[k - 1]) {
+    if (count < k) {
+      at = count++;
+    } else if (distance < distances[k - 1]) {
       at = k - 1;
     } else {
       continue;
     }
-    for (; at > 0 && outDistances[at - 1] > distance; at--) {
-      outRowids[at] = outRowids[at - 1];
-      outDistances[at] = outDistances[at - 1];
+    for (; at > 0 && distances[at - 1] > distance; at--) {
+      rowids[at] = rowids[at - 1];
+      distances[at] = distances[at - 1];
     }
-    outRowids[at] = candidates.items[j].rowid;
-    outDistances[at] = distance;
+    rowids[at] = candidates.items[j].rowid;
+    distances[at] = distance;
   }
+  *outRowids = rowids;
+  *outDistances = distances;
+  *outCount = count;
+  rowids = NULL;
+  distances = NULL;
   rc = SQLITE_OK;
 
 cleanup:
+  sqlite3_free(rowids);
+  sqlite3_free(distances);
   sqlite3_free(queryQuantized);
   diskann_candidate_list_free(&candidates);
   diskann_visited_set_free(&visited);
@@ -11914,15 +11972,15 @@ static int diskann_insert_graph(vec0_vtab *p, int i, i64 rowid,
 
   int L = cfg->search_list_size_insert > 0 ? cfg->search_list_size_insert
                                            : cfg->search_list_size;
-  i64 *searchRowids = sqlite3_malloc64((sqlite3_uint64)L * sizeof(i64));
-  f32 *searchDistances = sqlite3_malloc64((sqlite3_uint64)L * sizeof(f32));
+  i64 *searchRowids = NULL;
+  f32 *searchDistances = NULL;
   i64 *neighbors = sqlite3_malloc(cfg->n_neighbors * sizeof(i64));
-  if (!searchRowids || !searchDistances || !neighbors) {
+  if (!neighbors) {
     rc = SQLITE_NOMEM;
     goto cleanup;
   }
   int searchCount;
-  rc = diskann_search(p, i, vector, L, L, searchRowids, searchDistances,
+  rc = diskann_search(p, i, vector, L, L, &searchRowids, &searchDistances,
                       &searchCount);
   if (rc != SQLITE_OK) {
     goto cleanup;
@@ -12445,15 +12503,11 @@ static int diskann_knn(vec0_vtab *p,
     int L = cfg->search_list_size_search > 0 ? cfg->search_list_size_search
                                              : cfg->search_list_size;
     int n = L > k ? L : (int)k;
-    i64 *found = sqlite3_malloc64((sqlite3_uint64)n * sizeof(i64));
-    f32 *foundDistances = sqlite3_malloc64((sqlite3_uint64)n * sizeof(f32));
+    i64 *found = NULL;
+    f32 *foundDistances = NULL;
     int foundCount = 0;
-    if (!found || !foundDistances) {
-      rc = SQLITE_NOMEM;
-    } else {
-      rc = diskann_search(p, vectorColumnIdx, queryVector, n, L, found,
-                          foundDistances, &foundCount);
-    }
+    rc = diskann_search(p, vectorColumnIdx, queryVector, n, L, &found,
+                        &foundDistances, &foundCount);
     for (int j = 0; rc == SQLITE_OK && j < foundCount; j++) {
       rc = array_append(&rowids, &found[j]);
       if (rc == SQLITE_OK) {

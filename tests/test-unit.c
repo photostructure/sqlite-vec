@@ -1367,21 +1367,23 @@ void test_diskann_candidate_list_operations() {
   struct DiskannCandidateList list;
   int rc = diskann_candidate_list_init(&list, 5);
   assert(rc == SQLITE_OK);
+  int held;
 
-  diskann_candidate_list_insert(&list, 10, 3.0f);
-  diskann_candidate_list_insert(&list, 20, 1.0f);
-  diskann_candidate_list_insert(&list, 30, 2.0f);
+  assert(diskann_candidate_list_insert(&list, 10, 3.0f, &held) == SQLITE_OK);
+  assert(diskann_candidate_list_insert(&list, 20, 1.0f, &held) == SQLITE_OK);
+  assert(diskann_candidate_list_insert(&list, 30, 2.0f, &held) == SQLITE_OK);
   assert(list.count == 3);
   assert(list.items[0].rowid == 20 && list.items[0].distance == 1.0f);
   assert(list.items[1].rowid == 30 && list.items[1].distance == 2.0f);
   assert(list.items[2].rowid == 10 && list.items[2].distance == 3.0f);
 
   // a rowid already held moves up to a nearer distance
-  diskann_candidate_list_insert(&list, 10, 0.5f);
+  assert(diskann_candidate_list_insert(&list, 10, 0.5f, &held) == SQLITE_OK);
   assert(list.count == 3);
   assert(list.items[0].rowid == 10 && list.items[0].distance == 0.5f);
   // and keeps its place for a farther one
-  diskann_candidate_list_insert(&list, 10, 9.0f);
+  assert(diskann_candidate_list_insert(&list, 10, 9.0f, &held) == SQLITE_OK);
+  assert(held == 1);
   assert(list.items[0].rowid == 10 && list.items[0].distance == 0.5f);
 
   assert(diskann_candidate_list_next_unvisited(&list) == 0);
@@ -1390,12 +1392,14 @@ void test_diskann_candidate_list_operations() {
 
   // at capacity a farther candidate is ignored, a nearer one drops the
   // farthest
-  diskann_candidate_list_insert(&list, 40, 4.0f);
-  diskann_candidate_list_insert(&list, 50, 5.0f);
+  assert(diskann_candidate_list_insert(&list, 40, 4.0f, &held) == SQLITE_OK);
+  assert(diskann_candidate_list_insert(&list, 50, 5.0f, &held) == SQLITE_OK);
   assert(list.count == 5);
-  assert(diskann_candidate_list_insert(&list, 60, 10.0f) == 0);
+  assert(diskann_candidate_list_insert(&list, 60, 10.0f, &held) == SQLITE_OK);
+  assert(held == 0);
   assert(list.count == 5);
-  assert(diskann_candidate_list_insert(&list, 60, 3.5f) == 1);
+  assert(diskann_candidate_list_insert(&list, 60, 3.5f, &held) == SQLITE_OK);
+  assert(held == 1);
   assert(list.count == 5);
   assert(list.items[4].rowid == 40);
 
@@ -1409,6 +1413,24 @@ void test_diskann_candidate_list_operations() {
   }
 
   diskann_candidate_list_free(&list);
+
+  // a list of capacity INT_MAX allocates for the candidates it holds: under a
+  // 4 MiB heap limit it takes 10000 of them, kept nearest first
+  sqlite3_int64 priorLimit = sqlite3_hard_heap_limit64(4 << 20);
+  rc = diskann_candidate_list_init(&list, 2147483647);
+  assert(rc == SQLITE_OK);
+  for (int r = 0; r < 10000; r++) {
+    float distance = (float)((r * 7919) % 10000);
+    assert(diskann_candidate_list_insert(&list, r, distance, &held) ==
+           SQLITE_OK);
+    assert(held == 1);
+  }
+  assert(list.count == 10000);
+  for (int i = 0; i < list.count; i++) {
+    assert(list.items[i].distance == (float)i);
+  }
+  diskann_candidate_list_free(&list);
+  sqlite3_hard_heap_limit64(priorLimit);
 
   printf("  All diskann_candidate_list_operations tests passed.\n");
 }
@@ -1452,6 +1474,90 @@ void test_diskann_visited_set_operations() {
   printf("  All diskann_visited_set_operations tests passed.\n");
 }
 
+// Runs the k = 5 KNN query of the 50-row table v for query, and writes the
+// rowids and distances it returns to rowids and distances.
+static void diskann_knn_5(sqlite3 *db, const float *query, long long *rowids,
+                          float *distances) {
+  sqlite3_stmt *stmt;
+  int rc = sqlite3_prepare_v2(
+      db, "select rowid, distance from v where e match ? and k = 5", -1,
+      &stmt, 0);
+  assert(rc == SQLITE_OK);
+  sqlite3_bind_blob(stmt, 1, query, 8 * sizeof(float), SQLITE_STATIC);
+  int rows = 0;
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    assert(rows < 5);
+    rowids[rows] = sqlite3_column_int64(stmt, 0);
+    distances[rows] = (float)sqlite3_column_double(stmt, 1);
+    rows++;
+  }
+  assert(rc == SQLITE_DONE);
+  assert(rows == 5);
+  sqlite3_finalize(stmt);
+}
+
+// A DiskANN search allocates for the candidates it finds, not for its search
+// list size: with search_list_size_insert and search_list_size_search at
+// 2147483647, inserts and a KNN query into a 50-row table succeed under a
+// 64 MiB heap limit, and the query returns what a search list of 64, which
+// also holds every row, returns.
+void test_diskann_search_list_size_allocation() {
+  printf("Starting %s...\n", __func__);
+  sqlite3 *db;
+  int rc = sqlite3_open(":memory:", &db);
+  assert(rc == SQLITE_OK);
+  rc = sqlite3_vec_init(db, NULL, NULL);
+  assert(rc == SQLITE_OK);
+  sqlite3_int64 priorLimit = sqlite3_hard_heap_limit64(64 << 20);
+
+  rc = sqlite3_exec(db,
+                    "create virtual table v using vec0(e float[8] indexed by "
+                    "diskann(neighbor_quantizer=binary, n_neighbors=8, "
+                    "search_list_size_insert=2147483647))",
+                    0, 0, 0);
+  assert(rc == SQLITE_OK);
+  sqlite3_stmt *stmt;
+  rc = sqlite3_prepare_v2(db, "insert into v(rowid, e) values (?, ?)", -1,
+                          &stmt, 0);
+  assert(rc == SQLITE_OK);
+  unsigned int seed = 12345;
+  for (int r = 1; r <= 50; r++) {
+    float vector[8];
+    for (int d = 0; d < 8; d++) {
+      seed = seed * 1103515245u + 12345u;
+      vector[d] = (float)((seed >> 8) % 2001) / 1000.0f - 1.0f;
+    }
+    sqlite3_bind_int64(stmt, 1, r);
+    sqlite3_bind_blob(stmt, 2, vector, sizeof vector, SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    assert(rc == SQLITE_DONE);
+    sqlite3_reset(stmt);
+  }
+  sqlite3_finalize(stmt);
+
+  const float query[8] = {0.1f, -0.2f, 0.3f, -0.4f, 0.5f, -0.6f, 0.7f, -0.8f};
+  long long hugeRowids[5], smallRowids[5];
+  float hugeDistances[5], smallDistances[5];
+  rc = sqlite3_exec(
+      db, "insert into v(v) values ('search_list_size_search=2147483647')", 0,
+      0, 0);
+  assert(rc == SQLITE_OK);
+  diskann_knn_5(db, query, hugeRowids, hugeDistances);
+  rc = sqlite3_exec(db, "insert into v(v) values ('search_list_size_search=64')",
+                    0, 0, 0);
+  assert(rc == SQLITE_OK);
+  diskann_knn_5(db, query, smallRowids, smallDistances);
+  for (int j = 0; j < 5; j++) {
+    assert(hugeRowids[j] == smallRowids[j]);
+    assert(hugeDistances[j] == smallDistances[j]);
+  }
+
+  sqlite3_close(db);
+  sqlite3_hard_heap_limit64(priorLimit);
+
+  printf("  All diskann_search_list_size_allocation tests passed.\n");
+}
+
 #endif /* SQLITE_VEC_ENABLE_DISKANN */
 
 int main() {
@@ -1479,6 +1585,7 @@ int main() {
   test_diskann_config_defaults();
   test_diskann_candidate_list_operations();
   test_diskann_visited_set_operations();
+  test_diskann_search_list_size_allocation();
 #endif
   printf("All unit tests passed.\n");
 }

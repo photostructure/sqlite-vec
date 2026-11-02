@@ -199,12 +199,14 @@ struct DiskannCandidateList {
   struct Vec0DiskannCandidate *items;
   int count;
   int capacity;
+  int allocated;
 };
 int diskann_candidate_list_init(struct DiskannCandidateList *list,
                                 int capacity);
 void diskann_candidate_list_free(struct DiskannCandidateList *list);
 int diskann_candidate_list_insert(struct DiskannCandidateList *list,
-                                  long long rowid, float distance);
+                                  long long rowid, float distance,
+                                  int *outHeld);
 int diskann_candidate_list_rerank(struct DiskannCandidateList *list, int i,
                                   float distance);
 int diskann_candidate_list_next_unvisited(
