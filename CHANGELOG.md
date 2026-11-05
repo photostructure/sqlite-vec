@@ -22,6 +22,7 @@
 - `insert into t(t) values ('oversample=N')` now succeeds on every `vec0` table, as on upstream, and on a table without a rescore column changes nothing; it used to fail with `SQL logic error`.
 - When the same connection deletes a row that a running full scan or KNN query has found but not yet read, reading that row's vector in a KNN query, or its `text` primary key or partition key in either query, now fails with `SQLITE_ERROR` instead of `SQLITE_EMPTY`, a code SQLite reserves for its own use. The primary key read fails with `Could not find a row with rowid N` and the partition key read with `SQL logic error`; both used to fail with `unknown error`.
 - `vec0`'s `xShadowName` also reports the `_rescore_chunksNN` and `_rescore_vectorsNN` tables of rescore columns and the `_vectorsNN`, `_diskann_nodesNN` and `_diskann_bufferNN` tables of DiskANN columns, which upstream's does not. Under `SQLITE_DBCONFIG_DEFENSIVE`, a table with one of those names beside any `vec0` table is read-only once SQLite marks it as a shadow table, as after a `VACUUM`, and `CREATE TABLE t_vectors00` beside a table `t` fails with `object name reserved for internal use`.
+- GitHub releases now wait for npm to serve the approved package, and carry these release notes.
 
 ### Fixed
 

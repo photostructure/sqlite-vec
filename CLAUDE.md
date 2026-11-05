@@ -165,7 +165,10 @@ stage it through npm OIDC trusted publishing with provenance.
 Manual steps (on `main`):
 
 1. Bump the `VERSION` file (format: `X.Y.Z` or `X.Y.Z-prerelease`, e.g. `1.1.2` or `1.2.0-beta.1`)
-2. Update `CHANGELOG.md` with the release notes
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`,
+   with the version from `VERSION`. That section becomes the GitHub release
+   notes, and `scripts/prepare-release.sh` stops the release before tagging
+   if it is missing or empty.
 3. Commit: `git commit -am "release: prepare vX.Y.Z"`
 4. Wait for the `Test` and `Memory Tests` workflows on that commit to pass
 5. Trigger `Build & Prepare Release` from `main` (`workflow_dispatch`, e.g.
@@ -180,14 +183,39 @@ The workflow then does the rest automatically:
   eight targets and runs `tests/test-npm-package.sh` against it, before tagging
 - Fast-forward merges the release branch to `main`, atomically pushes a signed
   `vX.Y.Z` tag, and dispatches `publish.yaml` at that exact tag
-- Rebuilds and packs the tagged source, then stages the package on npm
-- Creates the GitHub Release after npm accepts the staged package
+- Rebuilds and packs the tagged source, then stages the package on npm. npm
+  validates a staged package, which can take 10 to 30 minutes, then holds it
+  until a maintainer approves it with 2FA.
+- The `Create GitHub release` job checks npm every 5 minutes, for up to 5
+  hours 45 minutes. Any npm error other than "not found" (E404) ends the job
+  early. Once npm serves the version, it re-verifies the signed tag and creates
+  the GitHub Release. Its notes are the version's `CHANGELOG.md` section,
+  followed by GitHub's generated notes.
+  [`photostructure/changelog-release-action`](https://github.com/photostructure/changelog-release-action)
+  does the npm wait and extracts the `CHANGELOG.md` section.
 
-After both workflows pass, inspect the package under **Staged Packages** on
-npmjs.com and approve it with 2FA. Until that approval, the package version is
-not public. Prerelease versions use the leading prerelease identifier as their
-npm dist-tag. Supported prerelease identifiers are `alpha`, `beta`, and `rc`;
-for example, `2.1.0-beta.1` uses the `beta` dist-tag.
+When the `Stage package on npm` job of the `Stage npm Package` run finishes,
+inspect the package under **Staged Packages** on npmjs.com and approve it with
+2FA. Leave that run going: its `Create GitHub release` job waits for the
+approval. Until that approval, the package version is not public. Then wait for
+the `Create GitHub release` job to finish, and confirm that the GitHub release
+exists, is immutable, and has the version's `CHANGELOG.md` section at the top
+of its notes. Prerelease versions use the leading prerelease identifier as
+their npm dist-tag. Supported prerelease identifiers are `alpha`, `beta`, and
+`rc`; for example, `2.1.0-beta.1` uses the `beta` dist-tag.
+
+If the `Create GitHub release` job fails before it creates the release (its
+checks ran out before the stage was approved, or `npm view` failed with an
+error other than E404), approve the stage if it is not approved yet, then use
+**Re-run failed jobs** on that `Stage npm Package` run. GitHub allows re-runs
+for 30 days. Do not start a new release.
+
+If you reject the staged package, cancel that `Stage npm Package` run, or
+ignore its failed `Create GitHub release` job, and do not re-run it: npm never
+serves a rejected version, so the job fails after checking npm for 5 hours 45
+minutes. Then release a new version: bump `VERSION`, and in `CHANGELOG.md` move
+the rejected version's notes under the new version's heading, leaving a line
+under the rejected version's heading saying it was never published.
 
 **Note:** Do **not** create the git tag manually — the workflow creates the signed
 tag after the pre-tag gate. This fork publishes nothing to other language

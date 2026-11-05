@@ -8,9 +8,11 @@
 # This script:
 #   1. Reads version from VERSION file (must be bumped manually beforehand)
 #   2. Validates VERSION looks like valid semver
-#   3. Creates a release branch
-#   4. Syncs VERSION to sqlite-vec.h and package.json
-#   5. Commits and pushes the release branch
+#   3. Refuses to continue unless CHANGELOG.md has notes under
+#      `## [VERSION] - YYYY-MM-DD`
+#   4. Creates a release branch
+#   5. Syncs VERSION to sqlite-vec.h and package.json
+#   6. Commits and pushes the release branch
 #
 # Outputs (for GitHub Actions):
 #   - Writes branch=<name>, version=<version>, and commit=<sha> to
@@ -18,10 +20,11 @@
 #
 # Developer workflow:
 #   1. Manually bump VERSION file (e.g., 0.4.0 → 0.4.1)
-#   2. Update CHANGELOG.md with changes
+#   2. Rename `## [Unreleased]` in CHANGELOG.md to `## [0.4.1] - YYYY-MM-DD`
 #   3. Commit: git commit -am "release: prepare v0.4.1"
-#   4. Trigger release.yaml workflow
-#   5. The workflows build, tag, stage, and wait for maintainer 2FA approval
+#   4. Wait for Test and Memory Tests to pass on that commit
+#   5. Trigger release.yaml workflow
+#   6. The workflows build, tag, stage, and wait for maintainer 2FA approval
 #
 # Why VERSION is source of truth:
 #
@@ -75,6 +78,19 @@ if [[ "$VERSION" == *-* ]]; then
       exit 1
       ;;
   esac
+fi
+
+# publish.yaml copies this section into the GitHub release notes after npm
+# publishes the package. Check it here, before anything is tagged.
+NOTES="$(awk -v heading="## [$VERSION] - " \
+  'index($0, heading) == 1 { found = 1; next } found && /^## / { exit } found' \
+  CHANGELOG.md)"
+if ! grep -q '[^[:space:]]' <<< "$NOTES"; then
+  echo "ERROR: CHANGELOG.md has no notes under '## [$VERSION] - YYYY-MM-DD'." >&2
+  echo "Rename '## [Unreleased]' to '## [$VERSION] - $(date -u +%F)', keep its" >&2
+  echo "notes, commit to main, wait for Test and Memory Tests to pass on that" >&2
+  echo "commit, and start the release again." >&2
+  exit 1
 fi
 
 # Create release branch
