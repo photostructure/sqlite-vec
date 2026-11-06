@@ -6,7 +6,8 @@ on:
 permissions:
   contents: read
 jobs:
-  # Quick memory check as a gate (runs on every PR)
+  # Quick memory check that the Linux builds wait for (this workflow runs only
+  # on pushes to main, not on pull requests)
   memory-gate:
     runs-on: ubuntu-latest
     steps:
