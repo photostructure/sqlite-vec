@@ -194,7 +194,11 @@ jobs:
   build-darwin-arm64:
     name: Build darwin-arm64
     needs: [prepare-release]
-    runs-on: macos-14
+    runs-on: macos-15
+    env:
+      # Without a deployment target, the dylib requires the runner's macOS.
+      # darwin-arm64 was built on macos-14, so keep it loadable there.
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -350,7 +354,7 @@ jobs:
             runner: macos-15-intel
             binary: dist/darwin-x64/vec0.dylib
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
             binary: dist/darwin-arm64/vec0.dylib
           - target: win32-x64
             runner: windows-latest

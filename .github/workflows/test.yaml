@@ -101,7 +101,10 @@ jobs:
           name: sqlite-vec-macos-x86_64-extension
           path: dist/*
   build-macos-aarch64-extension:
-    runs-on: macos-14
+    runs-on: macos-15
+    env:
+      # Build as release.yaml and publish.yaml do for darwin-arm64.
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:

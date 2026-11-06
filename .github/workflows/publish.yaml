@@ -150,7 +150,7 @@ jobs:
             runner: macos-15-intel
             binary: dist/vec0.dylib
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
             binary: dist/vec0.dylib
           - target: win32-x64
             runner: windows-latest
@@ -179,6 +179,11 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
+          # Without a deployment target, the dylib requires the runner's macOS.
+          # darwin-arm64 was built on macos-14, so keep it loadable there.
+          if [ "$TARGET" = darwin-arm64 ]; then
+            export MACOSX_DEPLOYMENT_TARGET=14.0
+          fi
           case "$TARGET" in
             linux-x64|linux-arm64|darwin-x64|darwin-arm64)
               ./scripts/vendor.sh
