@@ -9,8 +9,9 @@ dependencies = [
 ]
 
 [dependency-groups]
-# `make format` / `make lint` run black over the Python tests.
-dev = ["black==26.5.1"]
+# `make format` / `make lint` run black over the Python tests. CI's lint job
+# runs clang-format from here, at the version that formatted sqlite-vec.c.
+dev = ["black==26.5.1", "clang-format==21.1.8"]
 
 [tool.uv]
 # Match the npm `min-release-age=14` policy in ../.npmrc: never resolve a
